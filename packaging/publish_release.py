@@ -46,8 +46,9 @@ class GitHub:
             raise ReleaseError("GitHub returned an invalid JSON response.") from error
 
     def upload_asset(self, release_id: int, path: Path) -> None:
+        # Asset uploads are served from uploads.github.com; api.github.com answers 404.
         endpoint = (
-            f"repos/{REPOSITORY}/releases/{release_id}/assets"
+            f"https://uploads.github.com/repos/{REPOSITORY}/releases/{release_id}/assets"
             f"?name={quote(path.name, safe='')}"
         )
         try:
