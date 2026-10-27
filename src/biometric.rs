@@ -115,6 +115,9 @@ mod imp {
     pub fn enrolled() -> bool {
         false
     }
+    pub fn authenticate(_reason: &str) -> Result<()> {
+        bail!("not supported on this platform")
+    }
     pub fn enroll(_password: &str) -> Result<()> {
         bail!("not supported on this platform")
     }
