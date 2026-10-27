@@ -461,6 +461,7 @@ pub fn show(
             if let Ok(mut cb) = arboard::Clipboard::new() {
                 if let Ok(text) = cb.get_text() {
                     out.input.extend(paste_bytes(&text, mode));
+                    lose_track(&mut sess.line_buf, &mut sess.line_untracked);
                 }
             }
         }
@@ -497,6 +498,18 @@ pub fn show(
         }
     }
 
+    // Only suggest when the screen agrees with what was typed: the cursor sits right after it
+    // and nothing (such as the shell's own suggestion) follows. This also hides suggestions
+    // for text that is not echoed, like a password.
+    let suggestion = cfg.suggestion.clone().filter(|_| {
+        has_focus && !st.search_open && display_offset == 0 && !sess.line_untracked && {
+            let (before, cursor_free) = line_before_cursor(&term.term);
+            cursor_free
+                && before.ends_with(&sess.line_buf)
+                && !crate::suggest::is_secret_prompt(&before)
+        }
+    });
+
     // ---------------- Keyboard ----------------
     let mut typed_any = false;
     if has_focus && !st.search_open {
@@ -509,13 +522,20 @@ pub fn show(
                         skip_text = false;
                         continue;
                     }
-                    sess.line_buf.push_str(&t);
+                    if !sess.line_untracked {
+                        sess.line_buf.push_str(&t);
+                    }
                     out.input
                         .extend(crate::term::encode_input(&sess.target.charset, &t));
                     typed_any = true;
                 }
                 egui::Event::Paste(t) => {
                     out.input.extend(paste_bytes(&t, mode));
+                    if t.contains(['\n', '\r']) {
+                        lose_track(&mut sess.line_buf, &mut sess.line_untracked);
+                    } else if !sess.line_untracked {
+                        sess.line_buf.push_str(&t);
+                    }
                     typed_any = true;
                 }
                 egui::Event::Copy => {
@@ -524,6 +544,7 @@ pub fn show(
                     } else if !cfg!(target_os = "macos") {
                         out.input.push(0x03);
                         sess.line_buf.clear();
+                        sess.line_untracked = false;
                     }
                 }
                 egui::Event::Cut => {
@@ -550,6 +571,10 @@ pub fn show(
                                     if let Ok(mut cb) = arboard::Clipboard::new() {
                                         if let Ok(text) = cb.get_text() {
                                             out.input.extend(paste_bytes(&text, mode));
+                                            lose_track(
+                                                &mut sess.line_buf,
+                                                &mut sess.line_untracked,
+                                            );
                                         }
                                     }
                                 }
@@ -569,9 +594,11 @@ pub fn show(
                         });
                         continue;
                     }
-                    if key == Key::ArrowRight && !m.any() {
-                        if let Some(sug) = &cfg.suggestion {
-                            out.input.extend(sug.as_bytes());
+                    // A suggestion computed before this frame's typing would be stale.
+                    if key == Key::ArrowRight && !m.any() && !typed_any {
+                        if let Some(sug) = &suggestion {
+                            out.input
+                                .extend(crate::term::encode_input(&sess.target.charset, sug));
                             sess.line_buf.push_str(sug);
                             out.accepted_suggestion = true;
                             continue;
@@ -580,8 +607,15 @@ pub fn show(
                     if m.ctrl && !m.alt {
                         if let Some(b) = ctrl_byte(key) {
                             out.input.push(b);
-                            if matches!(b, 0x03 | 0x15 | 0x04) {
-                                sess.line_buf.clear();
+                            match b {
+                                0x03 => {
+                                    sess.line_buf.clear();
+                                    sess.line_untracked = false;
+                                }
+                                0x15 => sess.line_buf.clear(),
+                                // Ctrl+L only redraws the line.
+                                0x0c => {}
+                                _ => lose_track(&mut sess.line_buf, &mut sess.line_untracked),
                             }
                             skip_text = true;
                             continue;
@@ -598,6 +632,7 @@ pub fn show(
                             };
                             out.input.push(0x1b);
                             out.input.extend(c.to_string().as_bytes());
+                            lose_track(&mut sess.line_buf, &mut sess.line_untracked);
                             skip_text = true;
                             continue;
                         }
@@ -606,14 +641,35 @@ pub fn show(
                         match key {
                             Key::Enter => {
                                 let line = std::mem::take(&mut sess.line_buf);
-                                if !mode.contains(TermMode::ALT_SCREEN) && !line.trim().is_empty() {
+                                let tracked = !std::mem::take(&mut sess.line_untracked);
+                                // Never keep what was typed at a password prompt.
+                                if tracked
+                                    && !mode.contains(TermMode::ALT_SCREEN)
+                                    && !line.trim().is_empty()
+                                    && !crate::suggest::is_secret_prompt(
+                                        &line_before_cursor(&term.term).0,
+                                    )
+                                {
                                     out.entered_line = Some(line);
                                 }
                             }
-                            Key::Backspace => {
+                            Key::Backspace if !m.alt && !m.ctrl => {
                                 sess.line_buf.pop();
                             }
-                            Key::ArrowUp | Key::ArrowDown | Key::Tab => sess.line_buf.clear(),
+                            Key::Backspace
+                            | Key::ArrowUp
+                            | Key::ArrowDown
+                            | Key::ArrowLeft
+                            | Key::ArrowRight
+                            | Key::Home
+                            | Key::End
+                            | Key::Delete
+                            | Key::PageUp
+                            | Key::PageDown
+                            | Key::Tab
+                            | Key::Escape => {
+                                lose_track(&mut sess.line_buf, &mut sess.line_untracked)
+                            }
                             _ => {}
                         }
                         out.input.extend(bytes);
@@ -830,6 +886,11 @@ pub fn show(
         let x = origin.x + cursor.point.column.0 as f32 * cell_w;
         let y = origin.y + cursor_row as f32 * cell_h;
         let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_w, cell_h));
+        let shape = match cursor.shape {
+            VtCursor::Beam => CursorShape::Beam,
+            VtCursor::Underline => CursorShape::Underline,
+            _ => cfg.cursor_shape,
+        };
         if !has_focus {
             painter.rect_stroke(
                 rect.shrink(0.5),
@@ -838,11 +899,6 @@ pub fn show(
                 egui::StrokeKind::Inside,
             );
         } else if blink_on {
-            let shape = match cursor.shape {
-                VtCursor::Beam => CursorShape::Beam,
-                VtCursor::Underline => CursorShape::Underline,
-                _ => cfg.cursor_shape,
-            };
             match shape {
                 CursorShape::Block => {
                     painter.rect_filled(rect, 1.0, scheme.cursor);
@@ -877,17 +933,31 @@ pub fn show(
                 }
             }
         }
-        // Autocomplete ghost text.
-        if let Some(sug) = &cfg.suggestion {
-            if has_focus && display_offset == 0 {
-                painter.text(
-                    Pos2::new(x + cell_w, y + cell_h / 2.0),
-                    egui::Align2::LEFT_CENTER,
-                    sug,
-                    cfg.font.clone(),
-                    scheme.fg.gamma_multiply(0.35),
-                );
+        // Suggestion ghost text, starting in the cursor cell and cut at the window edge.
+        if let Some(sug) = &suggestion {
+            let room = cols.saturating_sub(cursor.point.column.0);
+            let mut ghost = sug.chars().take(room);
+            let mut start = x;
+            // A block cursor covers its cell, so the first character is drawn on it.
+            if blink_on && matches!(shape, CursorShape::Block) {
+                if let Some(first) = ghost.next() {
+                    painter.text(
+                        rect.left_center(),
+                        egui::Align2::LEFT_CENTER,
+                        first,
+                        cfg.font.clone(),
+                        scheme.bg.gamma_multiply(0.7),
+                    );
+                    start += cell_w;
+                }
             }
+            painter.text(
+                Pos2::new(start, y + cell_h / 2.0),
+                egui::Align2::LEFT_CENTER,
+                ghost.collect::<String>(),
+                cfg.font.clone(),
+                scheme.fg.gamma_multiply(0.35),
+            );
         }
         // IME candidate window position.
         if has_focus {
@@ -1014,6 +1084,48 @@ fn row_text<T>(
     (s, map)
 }
 
+/// Stop following the typed line: an edit happened that `line_buf` cannot mirror.
+fn lose_track(line_buf: &mut String, untracked: &mut bool) {
+    line_buf.clear();
+    *untracked = true;
+}
+
+/// What the screen shows of the cursor's logical line up to the cursor (wrapped rows joined),
+/// and whether the cursor cell is empty.
+fn line_before_cursor<T>(term: &alacritty_terminal::Term<T>) -> (String, bool) {
+    const MAX_WRAPPED_ROWS: i32 = 12;
+    let grid = term.grid();
+    let cursor = grid.cursor.point;
+    let cols = grid.columns();
+    let top = -(grid.history_size() as i32);
+    let mut first = cursor.line.0;
+    while first > top
+        && cursor.line.0 - first < MAX_WRAPPED_ROWS
+        && grid[Line(first - 1)][Column(cols - 1)]
+            .flags
+            .contains(Flags::WRAPLINE)
+    {
+        first -= 1;
+    }
+    let mut text = String::new();
+    for l in first..=cursor.line.0 {
+        let row = &grid[Line(l)];
+        let end = if l == cursor.line.0 {
+            cursor.column.0.min(cols)
+        } else {
+            cols
+        };
+        for c in 0..end {
+            let cell = &row[Column(c)];
+            if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                text.push(cell.c);
+            }
+        }
+    }
+    let free = grid[cursor.line][Column(cursor.column.0.min(cols - 1))].c == ' ';
+    (text, free)
+}
+
 fn url_at(text: &str, map: &[usize], col: usize) -> Option<String> {
     let re = regex::Regex::new(r#"(?:https?|ftp)://[^\s<>"'`]+"#).ok()?;
     for m in re.find_iter(text) {
@@ -1121,5 +1233,66 @@ fn do_search(sess: &mut Session, st: &mut ViewState, dir: Direction) {
             st.search_status = format!("line {}", s.line.0);
         }
         None => st.search_status = "no matches".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::term::TermSize;
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::term::{Config, Term};
+    use alacritty_terminal::vte::ansi::Processor;
+
+    fn screen(cols: usize, output: &str) -> Term<VoidListener> {
+        let mut term = Term::new(Config::default(), &TermSize { cols, rows: 6 }, VoidListener);
+        Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new()
+            .advance(&mut term, output.as_bytes());
+        term
+    }
+
+    #[test]
+    fn reads_typed_text_up_to_the_cursor() {
+        let term = screen(40, "user@host:~$ git sta");
+        let (before, free) = line_before_cursor(&term);
+        assert_eq!(before, "user@host:~$ git sta");
+        assert!(free);
+    }
+
+    #[test]
+    fn joins_a_command_wrapped_over_several_rows() {
+        let term = screen(10, "$ echo aaaaaaaaaaaaaaa");
+        let (before, _) = line_before_cursor(&term);
+        assert_eq!(before, "$ echo aaaaaaaaaaaaaaa");
+    }
+
+    #[test]
+    fn does_not_reach_back_past_a_finished_line() {
+        let term = screen(40, "old output\r\n$ ls");
+        assert_eq!(line_before_cursor(&term).0, "$ ls");
+    }
+
+    #[test]
+    fn text_after_the_cursor_marks_a_shell_suggestion() {
+        // The shell printed its own grey suggestion, then moved the cursor back over it.
+        let term = screen(40, "$ gi\x1b[90mt status\x1b[0m\x1b[8D");
+        let (before, free) = line_before_cursor(&term);
+        assert_eq!(before, "$ gi");
+        assert!(!free);
+    }
+
+    #[test]
+    fn unechoed_input_leaves_the_prompt_as_the_last_text() {
+        let term = screen(40, "[sudo] password for fikri: ");
+        let (before, _) = line_before_cursor(&term);
+        assert!(!before.ends_with("hunter2"));
+        assert!(crate::suggest::is_secret_prompt(&before));
+    }
+
+    #[test]
+    fn moving_the_cursor_left_shortens_the_text_before_it() {
+        let term = screen(40, "$ git sta\x1b[3D");
+        let (before, _) = line_before_cursor(&term);
+        assert!(!before.ends_with("git sta"));
     }
 }

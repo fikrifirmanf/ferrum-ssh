@@ -9,6 +9,7 @@ mod forward;
 mod hotkeys;
 mod icons;
 mod importers;
+mod instance;
 #[cfg(test)]
 mod it_tests;
 mod keys;
@@ -18,6 +19,7 @@ mod native;
 mod qa;
 mod sftp;
 mod store;
+mod suggest;
 mod term;
 mod themes;
 mod ui;
@@ -29,6 +31,18 @@ fn main() -> eframe::Result<()> {
 
     // `ferrum ssh://user@host:22` opens a quick-connect tab on launch.
     let deep_link = std::env::args().nth(1);
+
+    // A second launch focuses the running window, passing on its deep link, and exits.
+    // QA runs are disposable and may run beside a real instance.
+    let instance = if std::env::var_os("FERRUM_QA").is_some() {
+        None
+    } else {
+        match instance::claim(&store::data_dir(), deep_link.as_deref()) {
+            instance::Claim::Primary(guard) => Some(guard),
+            instance::Claim::Handed => return Ok(()),
+            instance::Claim::Unguarded => None,
+        }
+    };
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).ok();
     let mut viewport = egui::ViewportBuilder::default()
@@ -56,6 +70,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Ferrum",
         options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, deep_link)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, deep_link, instance)))),
     )
 }

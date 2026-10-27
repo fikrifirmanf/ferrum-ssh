@@ -360,22 +360,18 @@ impl App {
                             ),
                         )
                     };
-                    let suggestion = if settings.autocomplete
-                        && i == tab.active
-                        && pane.session.line_buf.chars().count() >= 2
-                    {
-                        let lb = pane.session.line_buf.clone();
-                        self.vault
-                            .history
-                            .iter()
-                            .rev()
-                            .map(|h| h.command.as_str())
-                            .chain(self.vault.snippets.iter().map(|s| s.script.as_str()))
-                            .find(|c| c.starts_with(&lb) && c.len() > lb.len() && !c.contains('\n'))
-                            .map(|c| c[lb.len()..].to_string())
-                    } else {
-                        None
-                    };
+                    let suggestion =
+                        if settings.autocomplete && i == tab.active && !pane.session.line_untracked
+                        {
+                            crate::suggest::suggest(
+                                &pane.session.line_buf,
+                                &pane.session.target.label,
+                                &self.vault.history,
+                                &self.vault.snippets,
+                            )
+                        } else {
+                            None
+                        };
                     let cfg = ViewConfig {
                         scheme: &scheme,
                         font,

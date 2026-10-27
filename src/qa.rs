@@ -14,6 +14,8 @@ pub struct Qa {
     waiting: bool,
     shot: Arc<parking_lot::Mutex<Option<Arc<egui::ColorImage>>>>,
     dir: std::path::PathBuf,
+    /// Keyboard events to feed through egui's input on the next frame.
+    pub keys: Vec<egui::Event>,
 }
 
 impl Qa {
@@ -35,6 +37,7 @@ impl Qa {
             waiting: false,
             shot: Default::default(),
             dir,
+            keys: vec![],
         })
     }
 }
@@ -343,6 +346,25 @@ impl App {
             }
             "light" => {
                 self.vault.settings.ui_theme = crate::model::UiTheme::Light;
+            }
+            // Real keyboard input, so suggestions and line tracking run as for a user.
+            "keys" | "right" | "enter" => {
+                let key = |key| egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                if let Some(qa) = self.qa.as_mut() {
+                    qa.keys.push(match step {
+                        "keys" => egui::Event::Text(
+                            std::env::var("FERRUM_QA_KEYS").unwrap_or_else(|_| "git sta".into()),
+                        ),
+                        "right" => key(egui::Key::ArrowRight),
+                        _ => key(egui::Key::Enter),
+                    });
+                }
             }
             _ => log::warn!("unknown QA step {step}"),
         }

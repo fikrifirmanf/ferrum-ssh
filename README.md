@@ -35,6 +35,7 @@ Captured from the running app with demo hosts. No saved connections or credentia
 - **Import:** OpenSSH config, PuTTY, MobaXterm, SecureCRT and CSV, plus cloud hosts from DigitalOcean, AWS EC2 and Azure.
 - **Vault:** stored on disk, optionally encrypted with a master password (Argon2id + ChaCha20-Poly1305). It auto-locks when idle and supports encrypted export/import and folder sync.
 - **Appearance:** dark, midnight and light themes, accent colours, 18 terminal colour schemes, custom fonts and keyword highlighting.
+- **Suggestions:** as you type in a terminal, grey ghost text offers a command from this host's history, other history, your snippets, then a built-in list of about 500 common commands (git, docker, kubectl, systemctl, apt and more). Press → to accept. It pauses after Tab, ↑ or cursor moves, and never records or offers anything typed at a password prompt. Turn it off in Settings → Terminal.
 - **Command palette** (⌘K / Ctrl+K) and an optional AI command assistant.
 
 ## Build

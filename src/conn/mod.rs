@@ -204,6 +204,9 @@ pub struct Session {
     pub log_id: Uuid,
     /// Characters typed since the last Enter, used for history and autocomplete.
     pub line_buf: String,
+    /// Set once the line was edited in a way `line_buf` cannot follow (cursor keys, history
+    /// recall, shell completion); cleared by Enter or Ctrl+C. Suggestions pause meanwhile.
+    pub line_untracked: bool,
     pub reconnect_attempts: u32,
     pub reconnect_at: Option<f64>,
     pub user_closed: bool,
@@ -300,6 +303,7 @@ pub fn spawn_session(
         started: crate::model::now_ts(),
         log_id,
         line_buf: String::new(),
+        line_untracked: false,
         reconnect_attempts: 0,
         reconnect_at: None,
         user_closed: false,
