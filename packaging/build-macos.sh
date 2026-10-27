@@ -4,6 +4,34 @@
 set -eu
 
 cd "$(dirname "$0")/.."
+# A release must never silently fall back to an ad-hoc signature.
+IDENTITY=${MACOS_SIGNING_IDENTITY:-}
+PROFILE=${MACOS_NOTARY_PROFILE:-}
+if [ -n "$IDENTITY" ] || [ -n "$PROFILE" ] || [ "${MACOS_REQUIRE_NOTARIZATION:-0}" = 1 ]; then
+    case "$IDENTITY" in
+        "Developer ID Application: "*) ;;
+        *) echo 'Set MACOS_SIGNING_IDENTITY to a Developer ID Application identity.' >&2; exit 1 ;;
+    esac
+    if [ -z "$PROFILE" ]; then
+        echo 'Set MACOS_NOTARY_PROFILE to a notarytool keychain profile.' >&2
+        exit 1
+    fi
+fi
+sign() {
+    if [ -n "${MACOS_SIGNING_KEYCHAIN:-}" ]; then
+        codesign --keychain "$MACOS_SIGNING_KEYCHAIN" "$@"
+    else
+        codesign "$@"
+    fi
+}
+notarize() {
+    SUBMISSION=$1
+    set -- --keychain-profile "$PROFILE" --wait
+    if [ -n "${MACOS_SIGNING_KEYCHAIN:-}" ]; then
+        set -- "$@" --keychain "$MACOS_SIGNING_KEYCHAIN"
+    fi
+    xcrun notarytool submit "$SUBMISSION" "$@"
+}
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 TARGET=${1:-}
 if [ -n "$TARGET" ]; then
@@ -38,14 +66,36 @@ cp $I/icon_1024.png dist/iconset.iconset/icon_512x512@2x.png
 iconutil -c icns dist/iconset.iconset -o "$APP/Contents/Resources/Ferrum.icns"
 rm -rf dist/iconset.iconset
 
-# Ad-hoc signature so the bundle is internally consistent (not notarised).
-codesign --force --deep --sign - "$APP"
+if [ -n "$IDENTITY" ]; then
+    sign --force --timestamp --options runtime --sign "$IDENTITY" "$APP"
+else
+    echo 'Warning: local ad-hoc build; downloaded copies will trigger Gatekeeper.' >&2
+    codesign --force --sign - "$APP"
+fi
+codesign --verify --deep --strict --verbose=2 "$APP"
+
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
+if [ -n "$IDENTITY" ]; then
+    # Staple the app before packaging so copied apps also work offline.
+    ditto -c -k --keepParent "$APP" "$STAGE/Ferrum.zip"
+    notarize "$STAGE/Ferrum.zip"
+    xcrun stapler staple "$APP"
+    xcrun stapler validate "$APP"
+    spctl --assess --type execute --verbose=2 "$APP"
+    rm "$STAGE/Ferrum.zip"
+fi
 
 DMG=dist/Ferrum-$VERSION-macos-$ARCH.dmg
 rm -f "$DMG"
-STAGE=$(mktemp -d)
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 hdiutil create -volname "Ferrum" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
-rm -rf "$STAGE"
+if [ -n "$IDENTITY" ]; then
+    sign --force --timestamp --sign "$IDENTITY" "$DMG"
+    notarize "$DMG"
+    xcrun stapler staple "$DMG"
+    xcrun stapler validate "$DMG"
+    spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
+fi
 echo "$DMG"

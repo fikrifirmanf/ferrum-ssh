@@ -21,7 +21,18 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: packaging/build-macos.sh ${{ matrix.target }}
+      - name: Test macOS packaging
+        run: python3 -m unittest discover -s packaging -p 'test_build_macos.py' -v
+      - name: Sign, notarize and package macOS
+        run: sh packaging/build-macos-ci.sh ${{ matrix.target }}
+        env:
+          MACOS_REQUIRE_NOTARIZATION: "1"
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.target }}

@@ -49,6 +49,36 @@ On Linux, install the GUI headers first:
 sudo apt install libxkbcommon-dev libgl1-mesa-dev libwayland-dev libx11-dev libgtk-3-dev
 ```
 
+## macOS installation and signing
+
+If macOS says “Apple could not verify Ferrum,” the downloaded build has no Apple notarization ticket. For a copy you trust, dismiss the alert, open **System Settings → Privacy & Security**, and choose **Open Anyway** for Ferrum. See [Apple’s instructions for opening an app from an unidentified developer](https://support.apple.com/en-us/102445).
+
+Public macOS releases need a **Developer ID Application** certificate with its private key and Apple notarization credentials. The packaging script signs with hardened runtime and a secure timestamp, notarizes and staples the app, then signs, notarizes and staples the DMG. Gatekeeper must accept both before the build succeeds.
+
+For local release packaging, import your certificate into Keychain Access, then store notarization credentials interactively:
+
+```sh
+xcrun notarytool store-credentials ferrum-notary
+export MACOS_SIGNING_IDENTITY="Developer ID Application: $(security find-identity -v -p codesigning | sed -n 's/.*"Developer ID Application: \(.*\)"/\1/p' | head -1)"
+export MACOS_NOTARY_PROFILE=ferrum-notary
+sh packaging/build-macos.sh
+```
+
+Set `MACOS_SIGNING_IDENTITY` to the exact certificate name shown by `security find-identity -v -p codesigning`. A build without signing variables remains available for local development and prints a Gatekeeper warning. Set `MACOS_REQUIRE_NOTARIZATION=1` to require notarization.
+
+For CircleCI, add these environment variables under **Project Settings → Environment Variables**. Use matching repository secrets for manual GitHub Actions builds.
+
+| Variable | Value |
+| --- | --- |
+| `MACOS_CERTIFICATE_P12_BASE64` | Base64 of a P12 export containing the Developer ID Application certificate and private key. |
+| `MACOS_CERTIFICATE_PASSWORD` | Password used to encrypt that P12 export. |
+| `MACOS_SIGNING_IDENTITY` | Full `Developer ID Application: …` certificate name. |
+| `APPLE_ID` | Apple developer account email. |
+| `APPLE_TEAM_ID` | Apple developer team ID. |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password created for notarization. |
+
+The CI wrapper imports the certificate into a temporary keychain and deletes it on exit. Tagged CircleCI releases and manual GitHub Actions packages fail if signing credentials are missing. Branch builds can still produce ad-hoc packages for development. Never commit the P12 file or credentials. Replace existing downloads with the signed release.
+
 ## Tests
 
 ```sh

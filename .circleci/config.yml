@@ -64,8 +64,11 @@ jobs:
       - run: rustup target add << parameters.target >>
       - rust-checks
       - run:
+          name: Test macOS packaging
+          command: python3 -m unittest discover -s packaging -p 'test_build_macos.py' -v
+      - run:
           name: Package macOS release
-          command: sh packaging/build-macos.sh << parameters.target >>
+          command: sh packaging/build-macos-ci.sh << parameters.target >>
           no_output_timeout: 20m
       - save_cache:
           key: "rust-v1-macos-<< parameters.target >>-{{ checksum \"Cargo.lock\" }}"

@@ -1,6 +1,6 @@
 [package]
 name = "ferrum-ssh"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Ferrum — a fast, cross-platform SSH / SFTP / Telnet / Serial / Mosh client written in Rust"
 license = "MIT"
