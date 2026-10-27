@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("publisher", Path(__file__).with_name("publish_release.py"))
@@ -48,13 +49,17 @@ class FakeGitHub:
         if method == "PATCH":
             self.draft.update(payload)
             return copy.deepcopy(self.draft)
+        if method == "DELETE":
+            asset_id = int(path.rsplit("/", 1)[1])
+            self.draft["assets"] = [a for a in self.draft["assets"] if a["id"] != asset_id]
+            return None
         raise AssertionError((method, path))
 
     def upload_asset(self, release_id, path):
         self.calls.append(("upload_asset", release_id, path.name))
         if self.fail_upload:
             raise publisher.ReleaseError("GitHub upload failed")
-        self.draft["assets"].append({"name": path.name, "size": path.stat().st_size,
+        self.draft["assets"].append({"id": 100 + len(self.calls), "name": path.name, "size": path.stat().st_size,
             "digest": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()})
         if self.corrupt_upload:
             self.draft["assets"][0]["digest"] = "sha256:" + "0" * 64
@@ -155,12 +160,59 @@ class ReleaseTests(unittest.TestCase):
             self.publish()
         self.assertFalse(any(call[0] in ("POST", "PATCH", "upload_asset") for call in self.github.calls))
 
+    def test_draft_from_failed_run_is_cleared_and_reused(self):
+        self.github.fail_upload = True
+        with self.assertRaises(publisher.ReleaseError):
+            self.publish()
+        self.github.fail_upload = False
+        self.github.draft["assets"] = [{"id": 5, "name": NAMES[0], "size": 1, "digest": "sha256:" + "0" * 64}]
+        self.github.existing = copy.deepcopy(self.github.draft)
+        self.github.calls = []
+        self.publish()
+        self.assertFalse(any(call[0] == "POST" for call in self.github.calls))
+        self.assertIn(("DELETE", "repos/fikrifirmanf/ferrum-ssh/releases/assets/5", None), self.github.calls)
+        self.assertFalse(self.github.draft["draft"])
+        self.assertEqual(sorted(a["name"] for a in self.github.draft["assets"]), sorted([*NAMES, "SHA256SUMS.txt"]))
+
     def test_prerelease_tag_is_not_marked_latest(self):
         self.cargo.write_text('[package]\nversion = "1.2.3-beta.1"\n')
         for name in NAMES:
             (self.artifacts / name).rename(self.artifacts / name.replace("1.2.3", "1.2.3-beta.1"))
         self.publish("v1.2.3-beta.1")
         self.assertEqual(self.github.calls[-1][2], {"draft": False, "prerelease": True, "make_latest": "false"})
+
+
+class GitHubClientTests(unittest.TestCase):
+    def test_release_lookup_finds_draft_hidden_from_tag_endpoint(self):
+        draft = {"id": 7, "tag_name": "v1.2.3", "draft": True}
+        responses = {
+            "repos/fikrifirmanf/ferrum-ssh/releases/tags/v1.2.3": publisher.ReleaseError("gh: Not Found (HTTP 404)"),
+            "repos/fikrifirmanf/ferrum-ssh/releases?per_page=100": [
+                {"id": 6, "tag_name": "v1.2.2", "draft": True}, draft],
+        }
+
+        def api(method, path, payload=None):
+            response = responses[path]
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        github = publisher.GitHub()
+        with mock.patch.object(github, "api", side_effect=api):
+            self.assertEqual(github.release("v1.2.3"), draft)
+
+    def test_release_lookup_reraises_errors_other_than_not_found(self):
+        github = publisher.GitHub()
+        with mock.patch.object(github, "api", side_effect=publisher.ReleaseError("HTTP 401")):
+            with self.assertRaisesRegex(publisher.ReleaseError, "401"):
+                github.release("v1.2.3")
+
+    def test_assets_upload_to_uploads_host(self):
+        with tempfile.NamedTemporaryFile() as asset, mock.patch.object(publisher.subprocess, "run") as run:
+            publisher.GitHub().upload_asset(7, Path(asset.name))
+        endpoint = run.call_args.args[0][4]
+        self.assertTrue(endpoint.startswith("https://uploads.github.com/repos/fikrifirmanf/ferrum-ssh/releases/7/assets?name="),
+                        endpoint)
 
 
 if __name__ == "__main__":

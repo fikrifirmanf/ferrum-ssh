@@ -13,6 +13,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 REPOSITORY = "fikrifirmanf/ferrum-ssh"
+# Release assets are only accepted on the uploads host; api.github.com answers 404.
+UPLOADS = "https://uploads.github.com"
 MAX_ASSET_BYTES = 256 * 1024 * 1024
 
 
@@ -47,7 +49,7 @@ class GitHub:
 
     def upload_asset(self, release_id: int, path: Path) -> None:
         endpoint = (
-            f"repos/{REPOSITORY}/releases/{release_id}/assets"
+            f"{UPLOADS}/repos/{REPOSITORY}/releases/{release_id}/assets"
             f"?name={quote(path.name, safe='')}"
         )
         try:
@@ -65,9 +67,11 @@ class GitHub:
         try:
             return self.api("GET", f"repos/{REPOSITORY}/releases/tags/{quote(tag, safe='')}")
         except ReleaseError as error:
-            if "HTTP 404" in str(error):
-                return None
-            raise
+            if "HTTP 404" not in str(error):
+                raise
+        # The by-tag endpoint hides drafts, so find a draft left by an earlier failed run.
+        releases = self.api("GET", f"repos/{REPOSITORY}/releases?per_page=100") or []
+        return next((r for r in releases if r.get("draft") and r.get("tag_name") == tag), None)
 
 
 def prepare_assets(directory: Path, cargo: Path, tag: str) -> dict[str, str]:
@@ -149,6 +153,9 @@ def publish(github: GitHub, directory: Path, cargo: Path, tag: str, commit: str)
     unknown = {a.get("name") for a in release.get("assets", [])} - set(digests)
     if unknown:
         raise ReleaseError("The existing draft contains other files. Review it before retrying.")
+    # Partial uploads from an earlier run would make the new uploads fail with "already_exists".
+    for asset in release.get("assets", []):
+        github.api("DELETE", f"repos/{REPOSITORY}/releases/assets/{asset['id']}")
     # unslop-ignore NO_N_PLUS_ONE -- GitHub's asset upload endpoint accepts exactly one binary per request.
     for name in digests:
         github.upload_asset(release["id"], directory / name)
