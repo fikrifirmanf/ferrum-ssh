@@ -4,6 +4,7 @@ mod ai;
 mod app;
 mod cloud;
 mod conn;
+mod containers;
 mod fonts;
 mod forward;
 mod hotkeys;

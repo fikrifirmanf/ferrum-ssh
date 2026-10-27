@@ -140,6 +140,7 @@ impl App {
                 ai_result: None,
                 ai_busy: false,
                 snippet_filter: String::new(),
+                containers: Default::default(),
                 custom_title: tab.title.clone(),
             }));
             last = Some(id);
@@ -183,6 +184,7 @@ impl App {
                     ai_result: None,
                     ai_busy: false,
                     snippet_filter: String::new(),
+                    containers: Default::default(),
                     custom_title: title,
                 }));
                 self.active_tab = Some(new_id);
