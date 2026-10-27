@@ -580,6 +580,18 @@ impl App {
                             };
                             match self.store.save(&self.vault) {
                                 Ok(()) => {
+                                    if self.biometric_enrolled {
+                                        // Keep the saved copy in step, or drop it with the password.
+                                        let synced = if new1.is_empty() {
+                                            crate::biometric::forget()
+                                        } else {
+                                            crate::biometric::enroll(new1)
+                                        };
+                                        if synced.is_err() || new1.is_empty() {
+                                            let _ = crate::biometric::forget();
+                                            self.biometric_enrolled = false;
+                                        }
+                                    }
                                     self.toast(
                                         if new1.is_empty() {
                                             "Master password removed"

@@ -2,6 +2,7 @@
 
 mod ai;
 mod app;
+mod biometric;
 mod cloud;
 mod conn;
 mod fonts;

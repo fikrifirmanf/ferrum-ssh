@@ -59,6 +59,11 @@ window-vibrancy = "0.8.1"
 muda = { version = "0.20", default-features = false }
 raw-window-handle = "0.6"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSView"] }
+security-framework = "3"
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "LAContext", "LAError", "block2"] }
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { package = "objc2-foundation", version = "0.3.2", default-features = false, features = ["NSString", "NSError"] }
 
 [profile.release]
 opt-level = 3
