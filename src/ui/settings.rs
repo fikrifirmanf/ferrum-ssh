@@ -348,6 +348,10 @@ impl App {
                 &mut s.confirm_close_tab,
                 "Confirm before closing an active session",
             );
+            ui.checkbox(
+                &mut s.show_host_status,
+                "Show whether hosts are reachable (opens a TCP connection to each saved host's port once a minute while the vault is open)",
+            );
             ui.horizontal(|ui| {
                 ui.label("Default keep-alive interval (seconds, 0 = off)");
                 ui.add(egui::DragValue::new(&mut s.default_keepalive_secs).range(0..=600));

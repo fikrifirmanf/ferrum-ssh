@@ -51,6 +51,7 @@ pub struct TermTab {
     pub ai_busy: bool,
     pub snippet_filter: String,
     pub custom_title: Option<String>,
+    pub health: crate::health::Monitor,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,6 +59,7 @@ pub enum SidePanel {
     Snippets,
     History,
     Ai,
+    Health,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -268,6 +270,11 @@ pub struct App {
     pub palette: PaletteState,
     pub forwards: ForwardManager,
     pub forward_status: HashMap<Uuid, (bool, Option<String>)>,
+    /// Latest reachability probe per host: `Some(ms)` answered, `None` did not.
+    pub host_status: HashMap<Uuid, Option<u32>>,
+    pub host_probe_running: bool,
+    /// UI time the last probe round started.
+    pub host_probe_at: Option<f64>,
     pub transfers: Transfers,
     pub show_transfers: bool,
     pub edit_watches: Vec<EditWatch>,
@@ -353,6 +360,9 @@ impl App {
             },
             forwards: ForwardManager::default(),
             forward_status: HashMap::new(),
+            host_status: HashMap::new(),
+            host_probe_running: false,
+            host_probe_at: None,
             transfers: Default::default(),
             show_transfers: false,
             edit_watches: vec![],
@@ -503,6 +513,7 @@ impl App {
             ai_busy: false,
             snippet_filter: String::new(),
             custom_title: None,
+            health: Default::default(),
         }));
         self.active_tab = Some(id);
     }
@@ -741,6 +752,28 @@ impl App {
                         }
                     }
                 }
+                AppEvent::Health {
+                    tab,
+                    session,
+                    result,
+                } => {
+                    for t in self.tabs.iter_mut() {
+                        if let Tab::Terminal(tt) = t {
+                            // A result for a pane that is no longer shown would mislabel the panel.
+                            if tt.id == tab && tt.health.session == session {
+                                tt.health.apply(result);
+                                break;
+                            }
+                        }
+                    }
+                }
+                AppEvent::HostLatency {
+                    host_id,
+                    latency_ms,
+                } => {
+                    self.host_status.insert(host_id, latency_ms);
+                }
+                AppEvent::HostProbeDone => self.host_probe_running = false,
                 AppEvent::CloudImport(res) => {
                     self.cloud_busy = false;
                     match res {

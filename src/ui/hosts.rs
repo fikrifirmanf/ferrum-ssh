@@ -254,6 +254,7 @@ impl App {
             ui.add_space(8.0);
         }
 
+        self.schedule_host_probes(ui.input(|i| i.time));
         let connected = self.connected_hosts();
         let searching = !self.search.trim().is_empty() || self.tag_filter.is_some();
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -391,7 +392,17 @@ impl App {
                 for (index, h) in hosts.iter().enumerate() {
                     let selected = self.selected_hosts.contains(&h.id);
                     let live = connected.contains(&h.id);
+                    let status = if self.vault.settings.show_host_status {
+                        self.host_status.get(&h.id).copied()
+                    } else {
+                        None
+                    };
                     let subtitle = self.host_subtitle(h);
+                    let subtitle = match status {
+                        Some(Some(ms)) => format!("{subtitle} · {ms} ms"),
+                        Some(None) => format!("{subtitle} · not reachable"),
+                        None => subtitle,
+                    };
                     let id = egui::Id::new(("host-card", h.id));
                     let size = if grid { Vec2::new(card_width, 132.0) } else { Vec2::new(ui.available_width(), 72.0) };
                     // Cards only sense clicks; dragging into a group is detected by hand below.
@@ -435,6 +446,16 @@ impl App {
                         if live {
                             p.circle_filled(egui::pos2(av_rect.right() - 2.0, av_rect.bottom() - 2.0), 5.0, pal.success);
                             p.circle_stroke(egui::pos2(av_rect.right() - 2.0, av_rect.bottom() - 2.0), 5.0, Stroke::new(2.0, pal.card));
+                        }
+                        if let Some(latency) = status {
+                            let color = match latency {
+                                Some(ms) if ms < 200 => pal.success,
+                                Some(_) => pal.warning,
+                                None => pal.danger,
+                            };
+                            let center = egui::pos2(av_rect.right() - 2.0, av_rect.top() + 2.0);
+                            p.circle_filled(center, 5.0, color);
+                            p.circle_stroke(center, 5.0, Stroke::new(2.0, pal.card));
                         }
                         if grid {
                             // Chips: tags, or the protocol when there are none.
@@ -624,6 +645,60 @@ impl App {
             .iter()
             .filter(|h| h.group_id.map(|g| ids.contains(&g)).unwrap_or(false))
             .count()
+    }
+
+    /// Starts a reachability round for the saved hosts once the last one is a minute old.
+    /// Hosts behind a jump host or proxy are skipped: a direct TCP connect would say nothing.
+    fn schedule_host_probes(&mut self, now: f64) {
+        const EVERY: f64 = 60.0;
+        const PARALLEL: usize = 8;
+        if !self.vault.settings.show_host_status
+            || self.host_probe_running
+            || self.host_probe_at.is_some_and(|at| now - at < EVERY)
+        {
+            return;
+        }
+        self.host_probe_at = Some(now);
+        let targets: Vec<(Uuid, String, u16)> = self
+            .vault
+            .hosts
+            .iter()
+            .filter(|h| {
+                matches!(
+                    h.protocol,
+                    Protocol::Ssh | Protocol::Mosh | Protocol::Telnet
+                )
+            })
+            .filter_map(|h| {
+                let r = self.vault.resolve(h);
+                let direct = r.chain.is_empty() && r.proxy.is_none();
+                (direct && !r.address.trim().is_empty()).then(|| (h.id, r.address, r.port))
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        self.host_probe_running = true;
+        let bridge = self.bridge.clone();
+        self.rt.spawn(async move {
+            let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(PARALLEL));
+            let mut tasks = tokio::task::JoinSet::new();
+            for (host_id, address, port) in targets {
+                let (permits, bridge) = (permits.clone(), bridge.clone());
+                tasks.spawn(async move {
+                    let _slot = permits.acquire().await;
+                    let latency_ms = crate::health::probe(&address, port)
+                        .await
+                        .map(|d| d.as_millis().max(1) as u32);
+                    bridge.send(AppEvent::HostLatency {
+                        host_id,
+                        latency_ms,
+                    });
+                });
+            }
+            while tasks.join_next().await.is_some() {}
+            bridge.send(AppEvent::HostProbeDone);
+        });
     }
 
     fn host_subtitle(&self, h: &Host) -> String {

@@ -141,6 +141,7 @@ impl App {
                 ai_busy: false,
                 snippet_filter: String::new(),
                 custom_title: tab.title.clone(),
+                health: Default::default(),
             }));
             last = Some(id);
         }
@@ -184,6 +185,7 @@ impl App {
                     ai_busy: false,
                     snippet_filter: String::new(),
                     custom_title: title,
+                    health: Default::default(),
                 }));
                 self.active_tab = Some(new_id);
             }
