@@ -161,9 +161,15 @@ jobs:
 
 workflows:
   compile-all-platforms:
+    when:
+      matches:
+        pattern: "^v.*"
+        value: << pipeline.git.tag >>
     jobs:
       - linux:
           filters:
+            branches:
+              ignore: /.*/
             tags:
               only: /^v.*/
       - macos:
@@ -172,10 +178,14 @@ workflows:
             parameters:
               target: [aarch64-apple-darwin, x86_64-apple-darwin]
           filters:
+            branches:
+              ignore: /.*/
             tags:
               only: /^v.*/
       - windows:
           filters:
+            branches:
+              ignore: /.*/
             tags:
               only: /^v.*/
       - publish:
