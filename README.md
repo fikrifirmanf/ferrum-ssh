@@ -77,7 +77,7 @@ For CircleCI, add these environment variables under **Project Settings → Envir
 | `APPLE_TEAM_ID` | Apple developer team ID. |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password created for notarization. |
 
-The CI wrapper imports the certificate into a temporary keychain and deletes it on exit. Tagged CircleCI releases and manual GitHub Actions packages fail if signing credentials are missing. Branch builds can still produce ad-hoc packages for development. Never commit the P12 file or credentials. Replace existing downloads with the signed release.
+The CI wrapper imports the certificate into a temporary keychain and deletes it on exit. Tagged CircleCI releases and manual GitHub Actions packages fail if signing credentials are missing. Local builds can still produce ad-hoc packages for development. Never commit the P12 file or credentials. Replace existing downloads with the signed release.
 
 ## Tests
 
@@ -121,7 +121,7 @@ To publish an update, bump `package.version` in `Cargo.toml`, refresh `Cargo.loc
 
 ## CircleCI
 
-`.circleci/config.yml` runs format checks and unit tests, then builds packages for Linux x86_64, Windows x86_64, macOS Apple Silicon and macOS Intel. Branch builds store installers as CircleCI artifacts. Tags starting with `v` also run a publishing job after Linux, Windows, Apple Silicon and Intel Mac builds succeed.
+`.circleci/config.yml` runs only when you push a tag starting with `v`, such as `v0.1.1`. Branch pushes and pull requests do not run this workflow. Each tag runs format checks and unit tests, builds Linux, Windows and both macOS packages, then publishes a GitHub Release after all builds succeed.
 
 Connect `fikrifirmanf/ferrum-ssh` in CircleCI and select the existing `.circleci/config.yml`. The macOS and Windows jobs need access to those CircleCI executors.
 
@@ -136,7 +136,7 @@ git push origin v0.1.1
 
 The publisher checks that the GitHub tag points to the exact commit CircleCI built. It requires every installer, verifies the uploaded digests, and publishes only after all files are present. Failed uploads leave a draft for a retry. Published releases are never overwritten; an identical retry succeeds without changes. Tags such as `v0.2.0-beta.1` are published as preview releases.
 
-Automatic publishing runs only for version tags. Branch pipelines build and test the app without publishing a release.
+Push the matching version tag to start the release workflow. Ordinary commits and merges do not start CircleCI jobs.
 
 To test the release helper locally, run `python3 -m unittest discover -s packaging -p 'test_*.py' -v`.
 
