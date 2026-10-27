@@ -82,8 +82,16 @@ class MacPackagingTests(unittest.TestCase):
         self.assertIn(["security", "delete-keychain", create[-1]], self.calls)
         self.assertFalse(Path(create[-1]).parent.exists())
 
-    def test_tag_without_credentials_fails_before_build(self):
+    def test_tag_without_credentials_falls_back_to_adhoc(self):
         result = self.run_build(ci=True, CIRCLE_TAG="v1.2.3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("local ad-hoc build", result.stderr)
+        self.assertIn(["codesign", "--force", "--sign", "-", "dist/Ferrum.app"], self.calls)
+        self.assertFalse(any(c[0] in ("xcrun", "security") for c in self.calls))
+        self.assertEqual(len(list((self.root / "dist").glob("*.dmg"))), 1)
+
+    def test_required_notarization_without_credentials_fails_before_build(self):
+        result = self.run_build(ci=True, CIRCLE_TAG="v1.2.3", MACOS_REQUIRE_NOTARIZATION="1")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Developer ID Application", result.stderr)
         self.assertEqual(self.calls, [])

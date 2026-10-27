@@ -51,9 +51,19 @@ sudo apt install libxkbcommon-dev libgl1-mesa-dev libwayland-dev libx11-dev libg
 
 ## macOS installation and signing
 
-If macOS says “Apple could not verify Ferrum,” the downloaded build has no Apple notarization ticket. For a copy you trust, dismiss the alert, open **System Settings → Privacy & Security**, and choose **Open Anyway** for Ferrum. See [Apple’s instructions for opening an app from an unidentified developer](https://support.apple.com/en-us/102445).
+Install the latest release with:
 
-Public macOS releases need a **Developer ID Application** certificate with its private key and Apple notarization credentials. The packaging script signs with hardened runtime and a secure timestamp, notarizes and staples the app, then signs, notarizes and staples the DMG. Gatekeeper must accept both before the build succeeds.
+```sh
+curl -fsSL https://raw.githubusercontent.com/fikrifirmanf/ferrum-ssh/main/install.sh | sh
+```
+
+The script picks the Apple Silicon or Intel build, checks it against the release's `SHA256SUMS.txt`, and copies `Ferrum.app` into `/Applications`. It asks for your password only if `/Applications` isn't writable. To install somewhere else, set `FERRUM_INSTALL_DIR`, for example `FERRUM_INSTALL_DIR=~/Applications`. Run the same command again to update.
+
+Current macOS releases are ad-hoc signed, not notarized by Apple. Files downloaded with `curl` don't get the quarantine flag that triggers Gatekeeper, so the installed app opens normally.
+
+If you download the DMG in a browser instead, macOS says “Apple could not verify Ferrum.” For a copy you trust, dismiss the alert, open **System Settings → Privacy & Security**, and choose **Open Anyway** for Ferrum. See [Apple’s instructions for opening an app from an unidentified developer](https://support.apple.com/en-us/102445).
+
+Notarized macOS releases need a **Developer ID Application** certificate with its private key and Apple notarization credentials. The packaging script signs with hardened runtime and a secure timestamp, notarizes and staples the app, then signs, notarizes and staples the DMG. Gatekeeper must accept both before the build succeeds.
 
 For local release packaging, import your certificate into Keychain Access, then store notarization credentials interactively:
 
@@ -77,7 +87,7 @@ For CircleCI, add these environment variables under **Project Settings → Envir
 | `APPLE_TEAM_ID` | Apple developer team ID. |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password created for notarization. |
 
-The CI wrapper imports the certificate into a temporary keychain and deletes it on exit. Tagged CircleCI releases and manual GitHub Actions packages fail if signing credentials are missing. Local builds can still produce ad-hoc packages for development. Never commit the P12 file or credentials. Replace existing downloads with the signed release.
+The CI wrapper imports the certificate into a temporary keychain and deletes it on exit. Without these variables, tagged CircleCI releases fall back to ad-hoc signed DMGs. Set `MACOS_REQUIRE_NOTARIZATION=1` in CircleCI to make missing credentials fail the release instead. Manual GitHub Actions packages always require notarization. Local builds can still produce ad-hoc packages for development. Never commit the P12 file or credentials. Replace existing downloads with the signed release.
 
 ## Tests
 
