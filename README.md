@@ -33,7 +33,7 @@ Captured from the running app with demo hosts. No saved connections or credentia
 - **Known hosts:** the app warns you when a server's key changes, and can import `~/.ssh/known_hosts`.
 - **History and logs:** a searchable command history, a connection log, and optional session recordings.
 - **Import:** OpenSSH config, PuTTY, MobaXterm, SecureCRT and CSV, plus cloud hosts from DigitalOcean, AWS EC2 and Azure.
-- **Vault:** stored on disk, optionally encrypted with a master password (Argon2id + ChaCha20-Poly1305). It auto-locks when idle and supports encrypted export/import and folder sync.
+- **Vault:** stored on disk, optionally encrypted with a master password (Argon2id + ChaCha20-Poly1305). It auto-locks when idle and supports encrypted export/import and folder sync. On macOS, Touch ID can unlock a master-password vault (Settings → Security); the password is kept in the login keychain behind the Touch ID prompt.
 - **Appearance:** dark, midnight and light themes, accent colours, 18 terminal colour schemes, custom fonts and keyword highlighting.
 - **Command palette** (⌘K / Ctrl+K) and an optional AI command assistant.
 
