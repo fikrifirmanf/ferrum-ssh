@@ -103,6 +103,18 @@ pub enum AppEvent {
         tab: u64,
         result: Result<String, String>,
     },
+    /// Result of a server-health poll for the panel of `tab`.
+    Health {
+        tab: u64,
+        session: u64,
+        result: Result<crate::health::Snapshot, String>,
+    },
+    /// Reachability probe result; `None` means the host did not answer.
+    HostLatency {
+        host_id: Uuid,
+        latency_ms: Option<u32>,
+    },
+    HostProbeDone,
     CloudImport(Result<Vec<crate::model::Host>, String>),
     SyncDone(Result<(String, crate::model::Vault), String>),
 }

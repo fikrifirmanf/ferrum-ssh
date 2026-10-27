@@ -35,6 +35,7 @@ Captured from the running app with demo hosts. No saved connections or credentia
 - **Import:** OpenSSH config, PuTTY, MobaXterm, SecureCRT and CSV, plus cloud hosts from DigitalOcean, AWS EC2 and Azure.
 - **Vault:** stored on disk, optionally encrypted with a master password (Argon2id + ChaCha20-Poly1305). It auto-locks when idle and supports encrypted export/import and folder sync.
 - **Appearance:** dark, midnight and light themes, accent colours, 18 terminal colour schemes, custom fonts and keyword highlighting.
+- **Server health:** a side panel in any SSH terminal shows live CPU, memory, swap, disks, uptime, load and the busiest processes, read over the same connection every 3 seconds. Linux reports everything; macOS and BSD report load, disks and processes. The vault also shows a green, amber or red dot and the latency on each host card (a plain TCP connect to the host's port once a minute while the vault is open; hosts behind a jump host or proxy are skipped). Turn the probes off in Settings → Connections.
 - **Command palette** (⌘K / Ctrl+K) and an optional AI command assistant.
 
 ## Build

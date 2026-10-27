@@ -6,6 +6,7 @@ mod cloud;
 mod conn;
 mod fonts;
 mod forward;
+mod health;
 mod hotkeys;
 mod icons;
 mod importers;
