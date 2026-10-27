@@ -4,7 +4,9 @@ set -eu
 set +x
 cd "$(dirname "$0")/.."
 
-if [ -n "${CIRCLE_TAG:-}" ] || [ -n "${MACOS_CERTIFICATE_P12_BASE64:-}" ]; then
+# Without a certificate, tagged builds fall back to ad-hoc signing; install.sh
+# downloads them without the quarantine flag. Set MACOS_REQUIRE_NOTARIZATION=1 to forbid that.
+if [ -n "${MACOS_CERTIFICATE_P12_BASE64:-}" ]; then
     export MACOS_REQUIRE_NOTARIZATION=1
 fi
 if [ -z "${MACOS_CERTIFICATE_P12_BASE64:-}" ]; then
