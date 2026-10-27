@@ -2,10 +2,13 @@
 
 mod ai;
 mod app;
+mod biometric;
 mod cloud;
 mod conn;
+mod containers;
 mod fonts;
 mod forward;
+mod health;
 mod hotkeys;
 mod icons;
 mod importers;

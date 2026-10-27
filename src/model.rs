@@ -505,6 +505,8 @@ pub struct Settings {
     pub azure_client_secret: String,
     pub azure_subscription: String,
     pub hosts_grid_view: bool,
+    /// Probe saved hosts so the vault shows whether they answer and how fast.
+    pub show_host_status: bool,
     pub sidebar_collapsed: bool,
     /// File extension (no dot) -> command used to open remote files, e.g. ("json", "code").
     pub file_associations: Vec<(String, String)>,
@@ -577,6 +579,7 @@ impl Default for Settings {
             azure_client_secret: String::new(),
             azure_subscription: String::new(),
             hosts_grid_view: true,
+            show_host_status: true,
             sidebar_collapsed: false,
             file_associations: vec![],
         }

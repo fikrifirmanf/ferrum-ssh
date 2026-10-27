@@ -51,6 +51,8 @@ pub struct TermTab {
     pub ai_busy: bool,
     pub snippet_filter: String,
     pub custom_title: Option<String>,
+    pub containers: crate::containers::Browser,
+    pub health: crate::health::Monitor,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,6 +60,8 @@ pub enum SidePanel {
     Snippets,
     History,
     Ai,
+    Health,
+    Containers,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -248,6 +252,10 @@ pub struct App {
     pub locked: bool,
     pub unlock_input: String,
     pub unlock_error: Option<String>,
+    /// Touch ID state: stored password present, prompt already shown for this lock, reply pending.
+    pub biometric_enrolled: bool,
+    pub biometric_tried: bool,
+    pub biometric_rx: Option<std::sync::mpsc::Receiver<anyhow::Result<String>>>,
     pub dirty: bool,
     pub last_save: Instant,
     pub bridge: Bridge,
@@ -268,6 +276,11 @@ pub struct App {
     pub palette: PaletteState,
     pub forwards: ForwardManager,
     pub forward_status: HashMap<Uuid, (bool, Option<String>)>,
+    /// Latest reachability probe per host: `Some(ms)` answered, `None` did not.
+    pub host_status: HashMap<Uuid, Option<u32>>,
+    pub host_probe_running: bool,
+    /// UI time the last probe round started.
+    pub host_probe_at: Option<f64>,
     pub transfers: Transfers,
     pub show_transfers: bool,
     pub edit_watches: Vec<EditWatch>,
@@ -336,6 +349,9 @@ impl App {
             locked,
             unlock_input: String::new(),
             unlock_error: None,
+            biometric_enrolled: crate::biometric::enrolled(),
+            biometric_tried: false,
+            biometric_rx: None,
             dirty: false,
             last_save: Instant::now(),
             bridge,
@@ -359,6 +375,9 @@ impl App {
             },
             forwards: ForwardManager::default(),
             forward_status: HashMap::new(),
+            host_status: HashMap::new(),
+            host_probe_running: false,
+            host_probe_at: None,
             transfers: Default::default(),
             show_transfers: false,
             edit_watches: vec![],
@@ -510,6 +529,8 @@ impl App {
             ai_busy: false,
             snippet_filter: String::new(),
             custom_title: None,
+            health: Default::default(),
+            containers: Default::default(),
         }));
         self.active_tab = Some(id);
     }
@@ -748,6 +769,56 @@ impl App {
                         }
                     }
                 }
+                AppEvent::Health {
+                    tab,
+                    session,
+                    result,
+                } => {
+                    for t in self.tabs.iter_mut() {
+                        if let Tab::Terminal(tt) = t {
+                            // A result for a pane that is no longer shown would mislabel the panel.
+                            if tt.id == tab && tt.health.session == session {
+                                tt.health.apply(result);
+                                break;
+                            }
+                        }
+                    }
+                }
+                AppEvent::HostLatency {
+                    host_id,
+                    latency_ms,
+                } => {
+                    self.host_status.insert(host_id, latency_ms);
+                }
+                AppEvent::HostProbeDone => self.host_probe_running = false,
+                AppEvent::Containers {
+                    tab,
+                    session,
+                    result,
+                } => {
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        tt.containers.apply_list(result);
+                    }
+                }
+                AppEvent::ContainerAction {
+                    tab,
+                    session,
+                    result,
+                } => {
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        tt.containers.apply_action(result);
+                    }
+                }
+                AppEvent::ContainerLogs {
+                    tab,
+                    session,
+                    key,
+                    result,
+                } => {
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        tt.containers.apply_logs(&key, result);
+                    }
+                }
                 AppEvent::CloudImport(res) => {
                     self.cloud_busy = false;
                     match res {
@@ -869,6 +940,14 @@ impl App {
             p.session.term.lock().status_line("\u{E036} Reconnecting…");
             conn::restart_session(&handle, &mut p.session, tpl);
         }
+    }
+
+    /// The terminal tab a container result belongs to, unless its pane has since changed.
+    fn container_tab(&mut self, tab: u64, session: u64) -> Option<&mut TermTab> {
+        self.tabs.iter_mut().find_map(|t| match t {
+            Tab::Terminal(tt) if tt.id == tab && tt.containers.session == session => Some(tt),
+            _ => None,
+        })
     }
 
     fn handle_sftp_event(&mut self, ev: SftpEvent) {
@@ -1195,8 +1274,49 @@ impl App {
         }
     }
 
+    fn start_biometric_unlock(&mut self, ctx: &egui::Context) {
+        if self.biometric_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::biometric::unlock());
+            ctx.request_repaint();
+        });
+        self.biometric_rx = Some(rx);
+    }
+
+    fn poll_biometric_unlock(&mut self) {
+        let Some(rx) = &self.biometric_rx else { return };
+        let Ok(result) = rx.try_recv() else { return };
+        self.biometric_rx = None;
+        match result {
+            Ok(password) => {
+                self.unlock_input = password;
+                self.try_unlock();
+                if self.locked {
+                    // The stored password no longer opens the vault, so stop offering it.
+                    let _ = crate::biometric::forget();
+                    self.biometric_enrolled = false;
+                    self.unlock_error = Some(format!(
+                        "The password saved for {} is out of date. Enter your master password.",
+                        crate::biometric::NAME
+                    ));
+                }
+            }
+            Err(e) if e.to_string() == "cancelled" => {}
+            Err(e) => self.unlock_error = Some(format!("{e:#}")),
+        }
+    }
+
     fn lock_screen(&mut self, ui: &mut egui::Ui) {
         let pal = self.pal();
+        self.poll_biometric_unlock();
+        if self.biometric_enrolled && !self.biometric_tried && self.qa.is_none() {
+            self.biometric_tried = true;
+            self.start_biometric_unlock(ui.ctx());
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(pal.bg))
             .show(ui, |ui| {
@@ -1226,6 +1346,15 @@ impl App {
                     if go {
                         self.try_unlock();
                     }
+                    if self.biometric_enrolled {
+                        ui.add_space(8.0);
+                        let waiting = self.biometric_rx.is_some();
+                        let label = format!("Unlock with {}", crate::biometric::NAME);
+                        if ui.add_enabled(!waiting, egui::Button::new(label)).clicked() {
+                            self.unlock_error = None;
+                            self.start_biometric_unlock(ui.ctx());
+                        }
+                    }
                 });
             });
     }
@@ -1235,6 +1364,7 @@ impl App {
         if self.loaded {
             if self.store.master_password.as_deref() == Some(pw.as_str()) {
                 self.locked = false;
+                self.biometric_tried = false;
                 self.unlock_error = None;
             } else {
                 self.unlock_error = Some("Wrong password".into());
@@ -1247,6 +1377,7 @@ impl App {
                 self.vault = v;
                 self.loaded = true;
                 self.locked = false;
+                self.biometric_tried = false;
                 self.unlock_error = None;
             }
             Ok(_) => self.unlock_error = Some("Could not open vault".into()),
