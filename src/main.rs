@@ -5,6 +5,7 @@ mod app;
 mod biometric;
 mod cloud;
 mod conn;
+mod containers;
 mod fonts;
 mod forward;
 mod health;

@@ -19,6 +19,24 @@ enum TermAction {
     Copy(String),
     OpenUrl(String),
     FontDelta(f32),
+    ListContainers {
+        tab: u64,
+        session: u64,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+    },
+    ContainerAct {
+        tab: u64,
+        session: u64,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        item: crate::containers::Item,
+        action: crate::containers::Action,
+    },
+    ContainerLogs {
+        tab: u64,
+        session: u64,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        item: crate::containers::Item,
+    },
     PollHealth {
         tab: u64,
         session: u64,
@@ -26,6 +44,9 @@ enum TermAction {
         previous: Option<crate::health::CpuTimes>,
     },
 }
+
+/// Seconds between container list refreshes while the panel is open.
+const CONTAINER_INTERVAL: f64 = 5.0;
 
 /// Seconds between server-health polls while the panel is open.
 const HEALTH_INTERVAL: f64 = 3.0;
@@ -214,6 +235,18 @@ impl App {
                                 Some(SidePanel::Health)
                             };
                         }
+                        if toggle(
+                            ui,
+                            crate::icons::PACKAGE,
+                            "Containers",
+                            tab.side_panel == Some(SidePanel::Containers),
+                        ) {
+                            tab.side_panel = if tab.side_panel == Some(SidePanel::Containers) {
+                                None
+                            } else {
+                                Some(SidePanel::Containers)
+                            };
+                        }
                         ui.separator();
                         if tab.panes.len() > 1
                             && toggle(
@@ -284,6 +317,33 @@ impl App {
             }
         }
 
+        // ---------- Container polling ----------
+        if tab.side_panel == Some(SidePanel::Containers) {
+            if let Some(pane) = tab.panes.get(tab.active) {
+                let session = &pane.session;
+                if tab.containers.session != session.id {
+                    tab.containers.reset(session.id);
+                }
+                let now = ui.input(|i| i.time);
+                if !tab.containers.in_flight
+                    && now - tab.containers.last_poll >= CONTAINER_INTERVAL
+                    && session.is_live()
+                    && session.target.protocol == crate::model::Protocol::Ssh
+                {
+                    let client = session.ssh.lock().clone();
+                    if let Some(client) = client {
+                        tab.containers.in_flight = true;
+                        tab.containers.last_poll = now;
+                        actions.push(TermAction::ListContainers {
+                            tab: tab_id,
+                            session: session.id,
+                            client,
+                        });
+                    }
+                }
+            }
+        }
+
         // ---------- Side panel ----------
         if let Some(panel) = tab.side_panel {
             egui::Panel::right(egui::Id::new(("term-side", tab_id)))
@@ -340,6 +400,37 @@ impl App {
                             None => super::health_view::Source::Unsupported,
                         };
                         super::health_view::show(ui, pal, &tab.health, source);
+                    }
+                    SidePanel::Containers => {
+                        let source = match tab.panes.get(tab.active) {
+                            Some(p) if p.session.target.protocol != crate::model::Protocol::Ssh => {
+                                super::container_view::Source::Unsupported
+                            }
+                            Some(p) if !p.session.is_live() => {
+                                super::container_view::Source::Disconnected(&p.session.target.label)
+                            }
+                            Some(p) => super::container_view::Source::Ssh(&p.session.target.label),
+                            None => super::container_view::Source::Unsupported,
+                        };
+                        let command = super::container_view::show(ui, pal, &mut tab.containers, source);
+                        if let (Some(command), Some(pane)) = (command, tab.panes.get(tab.active)) {
+                            use super::container_view::Command;
+                            let session = pane.session.id;
+                            let client = pane.session.ssh.lock().clone();
+                            match (command, client) {
+                                (Command::Shell(text), _) => pane.session.send_text(&text),
+                                (Command::Act(item, action), Some(client)) => {
+                                    tab.containers.busy = Some(format!("{} {}…", action.label(), item.name));
+                                    tab.containers.notice = None;
+                                    actions.push(TermAction::ContainerAct { tab: tab_id, session, client, item, action });
+                                }
+                                (Command::Logs(item), Some(client)) => {
+                                    tab.containers.logs = Some(crate::containers::LogView { item: item.clone(), text: None });
+                                    actions.push(TermAction::ContainerLogs { tab: tab_id, session, client, item });
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     SidePanel::Ai => {
                         ui.label(RichText::new("\u{E6A2} AI command assistant").strong().size(16.0));
@@ -697,6 +788,62 @@ impl App {
                         bridge.send(AppEvent::Health {
                             tab,
                             session,
+                            result,
+                        });
+                    });
+                }
+                TermAction::ListContainers {
+                    tab,
+                    session,
+                    client,
+                } => {
+                    let bridge = self.bridge.clone();
+                    self.rt.spawn(async move {
+                        let result = crate::containers::list(&client)
+                            .await
+                            .map_err(|e| format!("{e:#}"));
+                        bridge.send(AppEvent::Containers {
+                            tab,
+                            session,
+                            result,
+                        });
+                    });
+                }
+                TermAction::ContainerAct {
+                    tab,
+                    session,
+                    client,
+                    item,
+                    action,
+                } => {
+                    let bridge = self.bridge.clone();
+                    self.rt.spawn(async move {
+                        let result = crate::containers::act(&client, &item, action)
+                            .await
+                            .map(|()| format!("{} {}: done", action.label(), item.name))
+                            .map_err(|e| format!("{} {}: {e:#}", action.label(), item.name));
+                        bridge.send(AppEvent::ContainerAction {
+                            tab,
+                            session,
+                            result,
+                        });
+                    });
+                }
+                TermAction::ContainerLogs {
+                    tab,
+                    session,
+                    client,
+                    item,
+                } => {
+                    let bridge = self.bridge.clone();
+                    self.rt.spawn(async move {
+                        let result = crate::containers::logs(&client, &item)
+                            .await
+                            .map_err(|e| format!("{e:#}"));
+                        bridge.send(AppEvent::ContainerLogs {
+                            tab,
+                            session,
+                            key: item.key(),
                             result,
                         });
                     });

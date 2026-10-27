@@ -51,6 +51,7 @@ pub struct TermTab {
     pub ai_busy: bool,
     pub snippet_filter: String,
     pub custom_title: Option<String>,
+    pub containers: crate::containers::Browser,
     pub health: crate::health::Monitor,
 }
 
@@ -60,6 +61,7 @@ pub enum SidePanel {
     History,
     Ai,
     Health,
+    Containers,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -521,6 +523,7 @@ impl App {
             snippet_filter: String::new(),
             custom_title: None,
             health: Default::default(),
+            containers: Default::default(),
         }));
         self.active_tab = Some(id);
     }
@@ -781,6 +784,34 @@ impl App {
                     self.host_status.insert(host_id, latency_ms);
                 }
                 AppEvent::HostProbeDone => self.host_probe_running = false,
+                AppEvent::Containers {
+                    tab,
+                    session,
+                    result,
+                } => {
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        tt.containers.apply_list(result);
+                    }
+                }
+                AppEvent::ContainerAction {
+                    tab,
+                    session,
+                    result,
+                } => {
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        tt.containers.apply_action(result);
+                    }
+                }
+                AppEvent::ContainerLogs {
+                    tab,
+                    session,
+                    key,
+                    result,
+                } => {
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        tt.containers.apply_logs(&key, result);
+                    }
+                }
                 AppEvent::CloudImport(res) => {
                     self.cloud_busy = false;
                     match res {
@@ -902,6 +933,14 @@ impl App {
             p.session.term.lock().status_line("\u{E036} Reconnecting…");
             conn::restart_session(&handle, &mut p.session, tpl);
         }
+    }
+
+    /// The terminal tab a container result belongs to, unless its pane has since changed.
+    fn container_tab(&mut self, tab: u64, session: u64) -> Option<&mut TermTab> {
+        self.tabs.iter_mut().find_map(|t| match t {
+            Tab::Terminal(tt) if tt.id == tab && tt.containers.session == session => Some(tt),
+            _ => None,
+        })
     }
 
     fn handle_sftp_event(&mut self, ev: SftpEvent) {

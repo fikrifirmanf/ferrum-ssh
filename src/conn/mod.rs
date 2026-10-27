@@ -115,6 +115,23 @@ pub enum AppEvent {
         latency_ms: Option<u32>,
     },
     HostProbeDone,
+    /// Container/pod listing for the panel of `tab`.
+    Containers {
+        tab: u64,
+        session: u64,
+        result: Result<crate::containers::Listing, String>,
+    },
+    ContainerAction {
+        tab: u64,
+        session: u64,
+        result: Result<String, String>,
+    },
+    ContainerLogs {
+        tab: u64,
+        session: u64,
+        key: String,
+        result: Result<String, String>,
+    },
     CloudImport(Result<Vec<crate::model::Host>, String>),
     SyncDone(Result<(String, crate::model::Vault), String>),
 }

@@ -140,6 +140,7 @@ impl App {
                 ai_result: None,
                 ai_busy: false,
                 snippet_filter: String::new(),
+                containers: Default::default(),
                 custom_title: tab.title.clone(),
                 health: Default::default(),
             }));
@@ -184,6 +185,7 @@ impl App {
                     ai_result: None,
                     ai_busy: false,
                     snippet_filter: String::new(),
+                    containers: Default::default(),
                     custom_title: title,
                     health: Default::default(),
                 }));
