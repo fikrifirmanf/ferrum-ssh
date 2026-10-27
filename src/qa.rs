@@ -341,6 +341,14 @@ impl App {
                     }
                 }
             }
+            "health" => {
+                if let Some(Tab::Terminal(t)) = self
+                    .active_tab
+                    .and_then(|id| self.tabs.iter_mut().find(|t| t.id() == id))
+                {
+                    t.side_panel = Some(crate::app::SidePanel::Health);
+                }
+            }
             "containers" => {
                 if let Some(Tab::Terminal(t)) = self
                     .active_tab

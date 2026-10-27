@@ -34,8 +34,9 @@ Captured from the running app with demo hosts. No saved connections or credentia
 - **History and logs:** a searchable command history, a connection log, and optional session recordings.
 - **Containers:** a side panel for SSH tabs that lists Docker and Podman containers and Kubernetes pods by calling the CLIs already on the server. Start, stop or restart a container, read its recent logs, or type a shell command (`docker exec -it … sh`) into the terminal for you to run.
 - **Import:** OpenSSH config, PuTTY, MobaXterm, SecureCRT and CSV, plus cloud hosts from DigitalOcean, AWS EC2 and Azure.
-- **Vault:** stored on disk, optionally encrypted with a master password (Argon2id + ChaCha20-Poly1305). It auto-locks when idle and supports encrypted export/import and folder sync.
+- **Vault:** stored on disk, optionally encrypted with a master password (Argon2id + ChaCha20-Poly1305). It auto-locks when idle and supports encrypted export/import and folder sync. On macOS, Touch ID can unlock a master-password vault (Settings → Security); the password is kept in the login keychain behind the Touch ID prompt.
 - **Appearance:** dark, midnight and light themes, accent colours, 18 terminal colour schemes, custom fonts and keyword highlighting.
+- **Server health:** a side panel in any SSH terminal shows live CPU, memory, swap, disks, uptime, load and the busiest processes, read over the same connection every 3 seconds. Linux reports everything; macOS and BSD report load, disks and processes. The vault also shows a green, amber or red dot and the latency on each host card (a plain TCP connect to the host's port once a minute while the vault is open; hosts behind a jump host or proxy are skipped). Turn the probes off in Settings → Connections.
 - **Command palette** (⌘K / Ctrl+K) and an optional AI command assistant.
 
 ## Build

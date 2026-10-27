@@ -348,6 +348,10 @@ impl App {
                 &mut s.confirm_close_tab,
                 "Confirm before closing an active session",
             );
+            ui.checkbox(
+                &mut s.show_host_status,
+                "Show whether hosts are reachable (opens a TCP connection to each saved host's port once a minute while the vault is open)",
+            );
             ui.horizontal(|ui| {
                 ui.label("Default keep-alive interval (seconds, 0 = off)");
                 ui.add(egui::DragValue::new(&mut s.default_keepalive_secs).range(0..=600));
@@ -440,12 +444,71 @@ impl App {
                     self.locked = true;
                 }
             });
+            if has && crate::biometric::SUPPORTED {
+                self.settings_biometric(ui);
+            }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label("Auto-lock after (minutes, 0 = never)");
                 ui.add(egui::DragValue::new(&mut self.vault.settings.lock_after_minutes).range(0..=600));
             });
         });
+    }
+
+    fn settings_biometric(&mut self, ui: &mut egui::Ui) {
+        let pal = self.pal();
+        let name = crate::biometric::NAME;
+        ui.add_space(6.0);
+        if self.biometric_enrolled {
+            ui.horizontal(|ui| {
+                ui.label(format!("{name} unlock is on."));
+                if ui.button("Turn off").clicked() {
+                    match crate::biometric::forget() {
+                        Ok(()) => {
+                            self.biometric_enrolled = false;
+                            self.toast(&format!("{name} unlock turned off"), false);
+                        }
+                        Err(e) => self.toast(&format!("{e:#}"), true),
+                    }
+                }
+            });
+        } else if crate::biometric::available() {
+            ui.horizontal(|ui| {
+                if ui.button(format!("Unlock with {name}")).clicked() {
+                    self.enable_biometric();
+                }
+                ui.label(
+                    RichText::new("Saves your master password in the macOS Keychain.")
+                        .small()
+                        .color(pal.text_dim),
+                );
+            });
+        } else {
+            ui.label(
+                RichText::new(format!("{name} is not set up on this Mac."))
+                    .small()
+                    .color(pal.text_dim),
+            );
+        }
+    }
+
+    fn enable_biometric(&mut self) {
+        let Some(password) = self.store.master_password.clone() else {
+            return;
+        };
+        let result = crate::biometric::authenticate("turn on Touch ID unlock for Ferrum")
+            .and_then(|()| crate::biometric::enroll(&password));
+        match result {
+            Ok(()) => {
+                self.biometric_enrolled = true;
+                self.toast(
+                    &format!("{} unlock turned on", crate::biometric::NAME),
+                    false,
+                );
+            }
+            Err(e) if e.to_string() == "cancelled" => {}
+            Err(e) => self.toast(&format!("{e:#}"), true),
+        }
     }
 
     fn settings_sync(&mut self, ui: &mut egui::Ui) {

@@ -3,6 +3,7 @@
 pub mod container_view;
 pub mod dialogs;
 pub mod editors;
+pub mod health_view;
 pub mod hosts;
 pub mod menus;
 pub mod pages;

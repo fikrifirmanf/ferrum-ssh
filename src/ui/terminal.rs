@@ -37,10 +37,19 @@ enum TermAction {
         client: std::sync::Arc<crate::conn::ssh::SshClient>,
         item: crate::containers::Item,
     },
+    PollHealth {
+        tab: u64,
+        session: u64,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        previous: Option<crate::health::CpuTimes>,
+    },
 }
 
 /// Seconds between container list refreshes while the panel is open.
 const CONTAINER_INTERVAL: f64 = 5.0;
+
+/// Seconds between server-health polls while the panel is open.
+const HEALTH_INTERVAL: f64 = 3.0;
 
 fn pane_rects(area: Rect, n: usize, layout: SplitLayout) -> Vec<Rect> {
     if n <= 1 {
@@ -216,6 +225,18 @@ impl App {
                         }
                         if toggle(
                             ui,
+                            crate::icons::MONITOR,
+                            "Server health",
+                            tab.side_panel == Some(SidePanel::Health),
+                        ) {
+                            tab.side_panel = if tab.side_panel == Some(SidePanel::Health) {
+                                None
+                            } else {
+                                Some(SidePanel::Health)
+                            };
+                        }
+                        if toggle(
+                            ui,
                             crate::icons::PACKAGE,
                             "Containers",
                             tab.side_panel == Some(SidePanel::Containers),
@@ -268,6 +289,33 @@ impl App {
                     });
                 });
             });
+
+        // ---------- Server health polling ----------
+        if tab.side_panel == Some(SidePanel::Health) {
+            if let Some(pane) = tab.panes.get(tab.active) {
+                let session = &pane.session;
+                if tab.health.session != session.id {
+                    tab.health.reset(session.id);
+                }
+                let now = ui.input(|i| i.time);
+                if !tab.health.in_flight
+                    && now - tab.health.last_poll >= HEALTH_INTERVAL
+                    && session.is_live()
+                {
+                    let client = session.ssh.lock().clone();
+                    if let Some(client) = client {
+                        tab.health.in_flight = true;
+                        tab.health.last_poll = now;
+                        actions.push(TermAction::PollHealth {
+                            tab: tab_id,
+                            session: session.id,
+                            client,
+                            previous: tab.health.snapshot.as_ref().and_then(|s| s.cpu_times),
+                        });
+                    }
+                }
+            }
+        }
 
         // ---------- Container polling ----------
         if tab.side_panel == Some(SidePanel::Containers) {
@@ -339,6 +387,19 @@ impl App {
                                 }
                             }
                         });
+                    }
+                    SidePanel::Health => {
+                        let source = match tab.panes.get(tab.active) {
+                            Some(p) if p.session.target.protocol != crate::model::Protocol::Ssh => {
+                                super::health_view::Source::Unsupported
+                            }
+                            Some(p) if !p.session.is_live() => {
+                                super::health_view::Source::Disconnected(&p.session.target.label)
+                            }
+                            Some(p) => super::health_view::Source::Ssh(&p.session.target.label),
+                            None => super::health_view::Source::Unsupported,
+                        };
+                        super::health_view::show(ui, pal, &tab.health, source);
                     }
                     SidePanel::Containers => {
                         let source = match tab.panes.get(tab.active) {
@@ -712,6 +773,24 @@ impl App {
                 }
                 TermAction::OpenUrl(u) => {
                     let _ = open::that_detached(u);
+                }
+                TermAction::PollHealth {
+                    tab,
+                    session,
+                    client,
+                    previous,
+                } => {
+                    let bridge = self.bridge.clone();
+                    self.rt.spawn(async move {
+                        let result = crate::health::poll(&client, previous)
+                            .await
+                            .map_err(|e| format!("{e:#}"));
+                        bridge.send(AppEvent::Health {
+                            tab,
+                            session,
+                            result,
+                        });
+                    });
                 }
                 TermAction::ListContainers {
                     tab,
