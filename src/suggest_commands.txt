@@ -1,0 +1,507 @@
+# Common shell commands offered as inline suggestions, most useful first.
+# One per line; "#" starts a comment. A trailing space is kept so a suggestion can stop
+# where an argument is expected. Never list a command that destroys data when run as is.
+ls -la
+ls -lah
+ls -lh
+ls
+cd ..
+cd ~
+cd /var/log
+cd /etc
+cd -
+pwd
+clear
+exit
+cat /etc/os-release
+cat /etc/hosts
+cat /proc/cpuinfo
+cat /proc/meminfo
+tail -f /var/log/syslog
+tail -f /var/log/nginx/error.log
+tail -f /var/log/nginx/access.log
+tail -n 100 
+tail -f 
+head -n 20 
+less 
+grep -rn 
+grep -ri 
+grep -v 
+find . -name 
+find / -name 
+find . -type f -name 
+mkdir -p 
+touch 
+cp -r 
+mv 
+ln -s 
+chmod +x 
+chmod 755 
+chmod 644 
+chown -R 
+stat 
+file 
+wc -l 
+sort | uniq -c | sort -nr
+du -sh *
+du -sh 
+du -h --max-depth=1
+df -h
+free -h
+uptime
+whoami
+id
+hostname
+hostnamectl
+uname -a
+date
+which 
+whereis 
+history | grep 
+echo $PATH
+env | grep 
+export 
+alias 
+source ~/.bashrc
+source ~/.zshrc
+nano 
+vim 
+vi 
+top
+htop
+ps aux
+ps aux | grep 
+pgrep -af 
+kill -9 
+killall 
+pkill -f 
+lsof -i :
+lsof -i
+ss -tulpn
+ss -tlnp
+netstat -tulpn
+netstat -tlnp
+ip a
+ip addr show
+ip route
+ip -br a
+ping -c 4 
+traceroute 
+dig 
+nslookup 
+curl -I 
+curl -s 
+curl -sSL 
+curl -fsSL 
+curl -X POST 
+curl -H "Content-Type: application/json" 
+wget 
+ssh -i ~/.ssh/id_ed25519 
+ssh -L 
+ssh -N -L 
+ssh-keygen -t ed25519 -C 
+ssh-copy-id 
+ssh-add -l
+scp -r 
+rsync -avz 
+rsync -avzP 
+rsync -avz --delete 
+tar -xzf 
+tar -czf 
+tar -xvf 
+tar -tf 
+unzip 
+zip -r 
+gzip 
+gunzip 
+openssl x509 -in  -text -noout
+openssl rand -hex 32
+openssl s_client -connect 
+sudo -i
+sudo su -
+sudo systemctl status 
+systemctl restart 
+systemctl start 
+systemctl stop 
+systemctl enable 
+systemctl enable --now 
+systemctl reload 
+systemctl daemon-reload
+sudo systemctl restart 
+sudo systemctl start 
+sudo systemctl stop 
+sudo systemctl enable 
+sudo systemctl enable --now 
+sudo systemctl disable 
+sudo systemctl reload 
+sudo systemctl daemon-reload
+sudo journalctl -u 
+sudo journalctl -xe
+sudo journalctl -f
+sudo apt update
+sudo apt update && sudo apt upgrade -y
+sudo apt install 
+sudo apt remove 
+sudo apt autoremove
+sudo apt search 
+sudo dnf install 
+sudo dnf update
+sudo yum install 
+sudo yum update
+sudo pacman -Syu
+sudo pacman -S 
+sudo apk add 
+sudo zypper install 
+sudo nano 
+sudo vim 
+sudo tail -f 
+sudo cat 
+sudo ls -la
+sudo ufw status
+sudo ufw status verbose
+sudo ufw allow 
+sudo ufw enable
+sudo iptables -L -n -v
+sudo nginx -t
+sudo nginx -s reload
+sudo certbot --nginx
+sudo certbot renew --dry-run
+sudo crontab -e
+sudo useradd -m 
+sudo usermod -aG 
+sudo passwd 
+sudo chown -R 
+sudo chmod 
+sudo mount 
+sudo umount 
+systemctl status 
+systemctl list-units --type=service
+systemctl list-units --failed
+systemctl is-active 
+journalctl -u 
+journalctl -xe
+journalctl -f
+journalctl -u  -f
+journalctl --since "1 hour ago"
+dmesg | tail
+lsblk
+blkid
+mount | column -t
+fdisk -l
+crontab -l
+crontab -e
+last
+w
+who
+git status
+git status -sb
+git add .
+git add -p
+git commit -m "
+git commit --amend
+git push
+git push origin 
+git push -u origin 
+git pull
+git pull --rebase
+git fetch --all --prune
+git checkout 
+git checkout -b 
+git switch 
+git switch -c 
+git branch
+git branch -a
+git branch -d 
+git merge 
+git rebase 
+git rebase -i HEAD~
+git log --oneline
+git log --oneline --graph --decorate --all
+git log -p 
+git diff
+git diff --staged
+git diff HEAD~1
+git stash
+git stash pop
+git stash list
+git reset --soft HEAD~1
+git reset HEAD 
+git restore 
+git restore --staged 
+git clone 
+git remote -v
+git remote add origin 
+git tag 
+git show 
+git blame 
+git cherry-pick 
+git config --global user.name "
+git config --global user.email "
+git config --list
+docker ps
+docker ps -a
+docker images
+docker logs -f 
+docker logs --tail 100 
+docker exec -it 
+docker run -it --rm 
+docker run -d --name 
+docker run -d -p 
+docker build -t 
+docker build -t  .
+docker stop 
+docker start 
+docker restart 
+docker rm 
+docker rmi 
+docker pull 
+docker push 
+docker inspect 
+docker stats
+docker network ls
+docker volume ls
+docker system df
+docker compose up -d
+docker compose up -d --build
+docker compose down
+docker compose logs -f
+docker compose logs -f 
+docker compose ps
+docker compose pull
+docker compose restart
+docker compose exec 
+docker compose build
+docker-compose up -d
+docker-compose down
+docker-compose logs -f
+kubectl get pods
+kubectl get pods -A
+kubectl get pods -o wide
+kubectl get pods -n 
+kubectl get svc
+kubectl get nodes
+kubectl get deployments
+kubectl get ingress
+kubectl get events --sort-by=.lastTimestamp
+kubectl get all
+kubectl describe pod 
+kubectl describe node 
+kubectl logs -f 
+kubectl logs --tail=100 
+kubectl exec -it 
+kubectl apply -f 
+kubectl delete -f 
+kubectl delete pod 
+kubectl rollout restart deployment 
+kubectl rollout status deployment 
+kubectl scale deployment 
+kubectl port-forward 
+kubectl config get-contexts
+kubectl config use-context 
+kubectl config current-context
+kubectl top pods
+kubectl top nodes
+helm list -A
+helm install 
+helm upgrade --install 
+helm repo update
+helm uninstall 
+npm install
+npm install --save-dev 
+npm run dev
+npm run build
+npm run start
+npm run test
+npm run lint
+npm test
+npm start
+npm ci
+npm update
+npm outdated
+npx 
+yarn install
+yarn add 
+yarn dev
+yarn build
+yarn start
+pnpm install
+pnpm add 
+pnpm dev
+pnpm build
+pnpm run 
+node 
+node -v
+pm2 list
+pm2 logs
+pm2 restart 
+pm2 status
+pm2 start 
+pm2 save
+pip install 
+pip install -r requirements.txt
+pip install --upgrade pip
+pip list
+pip freeze > requirements.txt
+pip3 install 
+python3 -m venv venv
+python3 -m venv .venv
+python3 -m http.server 
+python3 -m pip install 
+python3 
+python3 -V
+source venv/bin/activate
+source .venv/bin/activate
+deactivate
+pytest -q
+pytest -x -vv
+cargo build
+cargo build --release
+cargo run
+cargo run --release
+cargo test
+cargo check
+cargo clippy
+cargo fmt
+cargo add 
+cargo update
+cargo install 
+cargo clean
+rustup update
+go build
+go build ./...
+go run .
+go test ./...
+go mod tidy
+go get 
+go fmt ./...
+go vet ./...
+make
+make install
+make clean
+make -j
+cmake -B build
+cmake --build build
+java -version
+java -jar 
+mvn clean install
+mvn clean package
+mvn test
+gradle build
+./gradlew build
+composer install
+composer update
+composer require 
+php artisan migrate
+php artisan serve
+php artisan cache:clear
+php artisan queue:work
+bundle install
+bundle exec 
+rails server
+rails console
+rake db:migrate
+brew install 
+brew update
+brew upgrade
+brew list
+brew search 
+brew services list
+brew services restart 
+brew cleanup
+brew doctor
+mysql -u root -p
+mysql -u 
+mysqldump -u 
+psql -U 
+psql -h 
+psql -d 
+psql -U postgres
+pg_dump -U 
+pg_dump -Fc -U 
+pg_restore -d 
+redis-cli
+redis-cli ping
+redis-cli info
+redis-cli monitor
+redis-cli -h 
+mongosh
+sqlite3 
+tmux
+tmux new -s 
+tmux attach -t 
+tmux a -t 
+tmux ls
+tmux kill-session -t 
+screen -S 
+screen -r 
+screen -ls
+nohup  > /dev/null 2>&1 &
+watch -n 1 
+xargs 
+jq . 
+jq -r 
+sed -i 's///g' 
+sed -n '1,20p' 
+awk '{print $1}' 
+awk -F: '{print $1}' /etc/passwd
+cut -d: -f1 
+tr -d '\r' 
+tee 
+diff -u 
+diff -r 
+column -t
+base64 
+base64 -d 
+md5sum 
+sha256sum 
+strings 
+xxd 
+nproc
+lscpu
+lsmod
+lspci
+lsusb
+iostat
+vmstat 1
+sar 
+mpstat
+nvidia-smi
+nvidia-smi -l 1
+timedatectl
+timedatectl set-timezone 
+locale
+man 
+tldr 
+type 
+terraform init
+terraform plan
+terraform apply
+terraform fmt
+terraform validate
+ansible-playbook -i 
+ansible all -m ping
+ansible-galaxy install 
+aws s3 ls
+aws s3 cp 
+aws s3 sync 
+aws sts get-caller-identity
+aws ec2 describe-instances
+aws configure
+aws --profile 
+gcloud auth login
+gcloud config list
+gcloud compute instances list
+az login
+az account show
+az group list
+doctl compute droplet list
+gh pr create
+gh pr list
+gh pr view --web
+gh pr checkout 
+gh repo clone 
+gh run list
+gh run watch
+gh auth login
+gh issue list
+ffmpeg -i 

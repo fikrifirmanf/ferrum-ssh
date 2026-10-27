@@ -236,7 +236,7 @@ impl App {
             ui.checkbox(&mut s.bell_sound, "Bell requests attention");
             ui.checkbox(
                 &mut s.autocomplete,
-                "Autocomplete from history and snippets (press → to accept)",
+                "Suggest commands from history, snippets and common commands (press → to accept)",
             );
             ui.add_space(6.0);
             egui::Grid::new("term-grid")

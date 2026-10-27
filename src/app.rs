@@ -298,10 +298,16 @@ pub struct App {
     pub settings_section: u8,
     pub drag_host: Option<Uuid>,
     pub qa: Option<crate::qa::Qa>,
+    /// Deep links handed over by later launches; `None` entries are plain focus requests.
+    pub handoffs: Option<std::sync::mpsc::Receiver<Option<String>>>,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, deep_link: Option<String>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        deep_link: Option<String>,
+        instance: Option<crate::instance::Guard>,
+    ) -> Self {
         #[cfg(target_os = "macos")]
         if let Err(error) = crate::native::install_glass(cc) {
             log::warn!("Native glass unavailable: {error}");
@@ -389,6 +395,7 @@ impl App {
             settings_section: 0,
             drag_host: None,
             qa: crate::qa::Qa::from_env(),
+            handoffs: instance.map(|guard| guard.serve(cc.egui_ctx.clone())),
         };
         if app.qa.is_some() {
             app.qa_seed();
@@ -1481,6 +1488,9 @@ impl App {
 
 impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if let Some(qa) = self.qa.as_mut() {
+            raw.events.append(&mut qa.keys);
+        }
         #[cfg(target_os = "macos")]
         while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
             let action = event.id.0;
@@ -1526,6 +1536,11 @@ impl eframe::App for App {
         }
         self.qa_tick(&ctx);
         self.process_events(&ctx);
+        while let Some(link) = self.handoffs.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            if let Some(link) = link {
+                self.open_quick_connect(&link);
+            }
+        }
         if ctx.input(|i| !i.events.is_empty() || i.pointer.is_moving()) {
             self.last_activity = Instant::now();
         }
