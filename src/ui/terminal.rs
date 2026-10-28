@@ -22,11 +22,13 @@ enum TermAction {
     ListContainers {
         tab: u64,
         session: u64,
+        sudo: bool,
         client: std::sync::Arc<crate::conn::ssh::SshClient>,
     },
     ContainerAct {
         tab: u64,
         session: u64,
+        sudo: bool,
         client: std::sync::Arc<crate::conn::ssh::SshClient>,
         item: crate::containers::Item,
         action: crate::containers::Action,
@@ -34,6 +36,7 @@ enum TermAction {
     ContainerLogs {
         tab: u64,
         session: u64,
+        sudo: bool,
         client: std::sync::Arc<crate::conn::ssh::SshClient>,
         item: crate::containers::Item,
     },
@@ -337,6 +340,7 @@ impl App {
                         actions.push(TermAction::ListContainers {
                             tab: tab_id,
                             session: session.id,
+                            sudo: tab.containers.use_sudo,
                             client,
                         });
                     }
@@ -416,17 +420,22 @@ impl App {
                         if let (Some(command), Some(pane)) = (command, tab.panes.get(tab.active)) {
                             use super::container_view::Command;
                             let session = pane.session.id;
+                            let sudo = tab.containers.use_sudo;
                             let client = pane.session.ssh.lock().clone();
                             match (command, client) {
                                 (Command::Shell(text), _) => pane.session.send_text(&text),
+                                (Command::UseSudo, _) => {
+                                    tab.containers.use_sudo = true;
+                                    tab.containers.last_poll = f64::NEG_INFINITY;
+                                }
                                 (Command::Act(item, action), Some(client)) => {
                                     tab.containers.busy = Some(format!("{} {}…", action.label(), item.name));
                                     tab.containers.notice = None;
-                                    actions.push(TermAction::ContainerAct { tab: tab_id, session, client, item, action });
+                                    actions.push(TermAction::ContainerAct { tab: tab_id, session, sudo, client, item, action });
                                 }
                                 (Command::Logs(item), Some(client)) => {
                                     tab.containers.logs = Some(crate::containers::LogView { item: item.clone(), text: None });
-                                    actions.push(TermAction::ContainerLogs { tab: tab_id, session, client, item });
+                                    actions.push(TermAction::ContainerLogs { tab: tab_id, session, sudo, client, item });
                                 }
                                 _ => {}
                             }
@@ -791,11 +800,12 @@ impl App {
                 TermAction::ListContainers {
                     tab,
                     session,
+                    sudo,
                     client,
                 } => {
                     let bridge = self.bridge.clone();
                     self.rt.spawn(async move {
-                        let result = crate::containers::list(&client)
+                        let result = crate::containers::list(&client, sudo)
                             .await
                             .map_err(|e| format!("{e:#}"));
                         bridge.send(AppEvent::Containers {
@@ -808,13 +818,14 @@ impl App {
                 TermAction::ContainerAct {
                     tab,
                     session,
+                    sudo,
                     client,
                     item,
                     action,
                 } => {
                     let bridge = self.bridge.clone();
                     self.rt.spawn(async move {
-                        let result = crate::containers::act(&client, &item, action)
+                        let result = crate::containers::act(&client, &item, action, sudo)
                             .await
                             .map(|()| format!("{} {}: done", action.label(), item.name))
                             .map_err(|e| format!("{} {}: {e:#}", action.label(), item.name));
@@ -828,12 +839,13 @@ impl App {
                 TermAction::ContainerLogs {
                     tab,
                     session,
+                    sudo,
                     client,
                     item,
                 } => {
                     let bridge = self.bridge.clone();
                     self.rt.spawn(async move {
-                        let result = crate::containers::logs(&client, &item)
+                        let result = crate::containers::logs(&client, &item, sudo)
                             .await
                             .map_err(|e| format!("{e:#}"));
                         bridge.send(AppEvent::ContainerLogs {

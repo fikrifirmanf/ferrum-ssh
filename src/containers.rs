@@ -18,9 +18,10 @@ const LOG_LINES: u32 = 300;
 const LOG_LIMIT: usize = 256 * 1024;
 
 const SCRIPT: &str = r#"
+S=; [ "$1" = sudo ] && S="sudo -n"
 for rt in docker podman; do
   command -v $rt >/dev/null 2>&1 || continue
-  out=$($rt ps -a --format '{{json .}}' 2>&1); rc=$?
+  out=$($S $rt ps -a --format '{{json .}}' 2>&1); rc=$?
   if [ $rc -eq 0 ]; then echo "@$rt"; else echo "@$rt-error"; fi
   printf '%s\n' "$out"
 done
@@ -154,22 +155,29 @@ pub struct Listing {
     pub errors: Vec<(Runtime, String)>,
 }
 
-pub async fn list(client: &SshClient) -> Result<Listing> {
-    let command = format!("sh -c {}", shell_quote(SCRIPT));
+/// With `sudo`, Docker and Podman run as `sudo -n` (passwordless sudo only), for users that
+/// are not in the docker group.
+pub async fn list(client: &SshClient, sudo: bool) -> Result<Listing> {
+    let command = format!(
+        "sh -c {} sh{}",
+        shell_quote(SCRIPT),
+        if sudo { " sudo" } else { "" }
+    );
     let (output, _) = tokio::time::timeout(LIST_TIMEOUT, client.exec(&command))
         .await
         .map_err(|_| anyhow!("The server did not answer in {}s", LIST_TIMEOUT.as_secs()))??;
     Ok(parse(&output))
 }
 
-pub async fn act(client: &SshClient, item: &Item, action: Action) -> Result<()> {
+pub async fn act(client: &SshClient, item: &Item, action: Action, sudo: bool) -> Result<()> {
     if item.runtime == Runtime::Kubernetes {
         bail!("Kubernetes pods can't be {}ed from here", action.verb());
     }
     item.valid()
         .ok_or_else(|| anyhow!("unsafe container name"))?;
     let command = format!(
-        "{} {} {} 2>&1",
+        "{}{} {} {} 2>&1",
+        sudo_prefix(sudo),
         item.runtime.cli(),
         action.verb(),
         item.scope
@@ -183,7 +191,7 @@ pub async fn act(client: &SshClient, item: &Item, action: Action) -> Result<()> 
     Ok(())
 }
 
-pub async fn logs(client: &SshClient, item: &Item) -> Result<String> {
+pub async fn logs(client: &SshClient, item: &Item, sudo: bool) -> Result<String> {
     item.valid()
         .ok_or_else(|| anyhow!("unsafe container name"))?;
     let command = match item.runtime {
@@ -191,7 +199,12 @@ pub async fn logs(client: &SshClient, item: &Item) -> Result<String> {
             "kubectl logs --tail={LOG_LINES} -n {} {} 2>&1",
             item.scope, item.name
         ),
-        rt => format!("{} logs --tail {LOG_LINES} {} 2>&1", rt.cli(), item.scope),
+        rt => format!(
+            "{}{} logs --tail {LOG_LINES} {} 2>&1",
+            sudo_prefix(sudo),
+            rt.cli(),
+            item.scope
+        ),
     };
     let (output, code) = tokio::time::timeout(LIST_TIMEOUT, client.exec(&command))
         .await
@@ -200,6 +213,15 @@ pub async fn logs(client: &SshClient, item: &Item) -> Result<String> {
         bail!("{}", last_line(&output));
     }
     Ok(clip_start(strip_ansi(&output), LOG_LIMIT))
+}
+
+fn sudo_prefix(sudo: bool) -> &'static str {
+    if sudo { "sudo -n " } else { "" }
+}
+
+/// True for the error Docker and Podman print when the user may not use the socket.
+pub fn is_permission_error(message: &str) -> bool {
+    message.to_lowercase().contains("permission denied")
 }
 
 fn last_line(output: &str) -> String {
@@ -362,6 +384,8 @@ pub struct Browser {
     pub notice: Option<Result<String, String>>,
     pub logs: Option<LogView>,
     pub filter: String,
+    /// Run Docker and Podman through `sudo -n`; chosen by the user for this pane.
+    pub use_sudo: bool,
 }
 
 impl Browser {
@@ -461,6 +485,14 @@ mod tests {
         assert_eq!(listing.errors[0].0, Runtime::Docker);
         assert!(listing.errors[0].1.contains("permission denied"));
         assert_eq!(listing.items.len(), 1);
+    }
+
+    #[test]
+    fn permission_errors_are_recognised() {
+        assert!(is_permission_error(
+            "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"
+        ));
+        assert!(!is_permission_error("Cannot connect to the Docker daemon"));
     }
 
     #[test]
