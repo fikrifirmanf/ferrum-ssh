@@ -49,7 +49,7 @@ impl App {
         };
         let mut reply: Option<PromptReply> = None;
         #[allow(deprecated)]
-        let id = egui::Id::new(("prompt", req.session));
+        let id = egui::Id::unique(("prompt", req.session));
         egui::Modal::new(id).frame(modal_frame(pal)).show(ctx, |ui| {
             ui.set_width(440.0);
             match &req.kind {
@@ -140,7 +140,7 @@ impl App {
         };
         let pal = self.pal();
         let mut outcome = Outcome::Keep;
-        let resp = egui::Modal::new(egui::Id::new("app-dialog"))
+        let resp = egui::Modal::new(egui::Id::unique("app-dialog"))
             .frame(modal_frame(pal))
             .show(ctx, |ui| {
                 ui.set_width(460.0);
@@ -157,6 +157,39 @@ impl App {
     fn dialog_body(&mut self, ui: &mut egui::Ui, dialog: &mut Dialog, pal: Palette) -> Outcome {
         let mut close = false;
         match dialog {
+            Dialog::QuickConnect { input, error } => {
+                title(ui, "Quick connect");
+                ui.label("Open a session with an address. Saved hosts stay in the library.");
+                field_label(ui, "Connection address", pal);
+                let response = ui.add(
+                    egui::TextEdit::singleline(input)
+                        .hint_text("user@host:port")
+                        .desired_width(f32::INFINITY),
+                );
+                if response.changed() {
+                    *error = None;
+                }
+                if let Some(message) = error {
+                    ui.colored_label(pal.danger, message.as_str());
+                }
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.add(primary_button("Connect", pal)).clicked()
+                        || (response.lost_focus() && enter_pressed(ui))
+                    {
+                        if crate::model::parse_quick_connect(input.trim()).is_some() {
+                            self.open_quick_connect(input.trim());
+                            close = true;
+                        } else {
+                            *error = Some("Enter a hostname or user@host:port.".into());
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            }
+
             Dialog::KeyGen {
                 kind,
                 label,

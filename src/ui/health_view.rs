@@ -51,6 +51,16 @@ pub fn show(ui: &mut egui::Ui, pal: Palette, monitor: &Monitor, source: Source) 
             );
         }
     });
+    if monitor
+        .updated
+        .is_some_and(|updated| updated.elapsed().as_secs() > 9)
+    {
+        ui.label(
+            RichText::new("Health sample is stale. Waiting for a new snapshot.")
+                .small()
+                .color(pal.warning),
+        );
+    }
     if let Some(error) = &monitor.error {
         ui.colored_label(pal.warning, format!("Last update failed: {error}"));
     }

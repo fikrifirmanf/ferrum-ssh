@@ -181,6 +181,10 @@ pub enum Dialog {
     Import {
         error: Option<String>,
     },
+    QuickConnect {
+        input: String,
+        error: Option<String>,
+    },
     Serial {
         cfg: SerialConfig,
         ports: Vec<String>,
@@ -268,6 +272,8 @@ pub struct App {
     pub current_group: Option<Uuid>,
     pub tag_filter: Option<String>,
     pub selected_hosts: HashSet<Uuid>,
+    pub inspected_host: Option<Uuid>,
+    pub host_inspector_open: bool,
     pub editor: Option<Editor>,
     pub host_test: Option<crate::ui::editors::HostTest>,
     pub prompts: VecDeque<PromptState>,
@@ -283,6 +289,7 @@ pub struct App {
     pub host_probe_at: Option<f64>,
     pub transfers: Transfers,
     pub show_transfers: bool,
+    pub transfer_retries: HashMap<u64, crate::ui::sftp_view::TransferRetry>,
     pub edit_watches: Vec<EditWatch>,
     pub keyword_cache: (Vec<KeywordRule>, Vec<(regex::Regex, Color32)>),
     pub sync_passphrase: String,
@@ -363,6 +370,8 @@ impl App {
             current_group: None,
             tag_filter: None,
             selected_hosts: HashSet::new(),
+            inspected_host: None,
+            host_inspector_open: false,
             editor: None,
             host_test: None,
             prompts: VecDeque::new(),
@@ -380,6 +389,7 @@ impl App {
             host_probe_at: None,
             transfers: Default::default(),
             show_transfers: false,
+            transfer_retries: HashMap::new(),
             edit_watches: vec![],
             keyword_cache: (vec![], vec![]),
             sync_passphrase: String::new(),
@@ -1391,7 +1401,7 @@ impl App {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         let pal = self.pal();
         egui::Panel::bottom("status")
-            .exact_size(26.0)
+            .exact_size(32.0)
             .frame(
                 egui::Frame::new()
                     .fill(crate::ui::chrome_fill(pal.sidebar))
@@ -1446,9 +1456,12 @@ impl App {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            RichText::new("⌘K  Command palette")
-                                .small()
-                                .color(pal.text_dim),
+                            RichText::new(format!(
+                                "{}  Command palette",
+                                crate::ui::command_shortcut("K")
+                            ))
+                            .small()
+                            .color(pal.text_dim),
                         );
                         if !self.sync_status.is_empty() {
                             ui.separator();
@@ -1490,6 +1503,7 @@ impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         if let Some(qa) = self.qa.as_mut() {
             raw.events.append(&mut qa.keys);
+            raw.events.push(egui::Event::PointerGone);
         }
         #[cfg(target_os = "macos")]
         while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
@@ -1528,7 +1542,7 @@ impl eframe::App for App {
         self.ensure_style(&ctx);
         self.updater.poll();
         self.application_menus(ui);
-        frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, 52.0), 16.0);
+        frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, 48.0), 16.0);
         if self.host_test.as_ref().is_some_and(|test| {
             self.locked || !matches!(&self.editor, Some(Editor::Host(h, _)) if **h == test.host)
         }) {
@@ -1570,6 +1584,7 @@ impl eframe::App for App {
         if self.show_transfers {
             self.transfers_drawer(ui);
         }
+        self.app_navigation(ui);
         match self.active_tab {
             None => self.vault_home(ui),
             Some(id) => {

@@ -46,6 +46,10 @@ impl App {
     pub fn qa_seed(&mut self) {
         self.loaded = false; // never persist demo data
         self.vault.settings = crate::model::Settings::default();
+        #[cfg(unix)]
+        {
+            self.vault.settings.local_shell = "/bin/sh".into();
+        }
         self.locked = false;
         let prod = Group {
             name: "Production".into(),
@@ -131,6 +135,13 @@ impl App {
         serial.serial.device = "/dev/tty.usbserial".into();
         self.vault.hosts.push(serial);
         self.vault.groups = vec![prod, stage];
+        // Visual QA uses explicit fixtures and never probes demo addresses.
+        for (index, latency) in [Some(24), Some(31), None, Some(28), Some(4), Some(6)]
+            .into_iter()
+            .enumerate()
+        {
+            self.host_status.insert(self.vault.hosts[index].id, latency);
+        }
         self.vault.keys = vec![SshKey {
             label: "work-laptop".into(),
             key_type: "ssh-ed25519".into(),
@@ -205,6 +216,36 @@ impl App {
             let step = qa.steps[qa.step].clone();
             self.qa_apply(&step);
         }
+        let ready = self.qa.as_ref().is_some_and(|qa| qa.frames == 69);
+        if ready {
+            let step = self
+                .qa
+                .as_ref()
+                .map(|qa| qa.steps[qa.step].as_str())
+                .unwrap_or("");
+            match step {
+                "hostkeys" => assert_eq!(
+                    self.inspected_host,
+                    self.filtered_hosts().get(1).map(|host| host.id),
+                    "Native ArrowDown must select the next host"
+                ),
+                "filtered" => assert_eq!(
+                    self.filtered_hosts()
+                        .iter()
+                        .map(|host| host.label.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["api-gateway"],
+                    "Native search, group and tag filters must compose"
+                ),
+                "retrytransfer" => {
+                    let jobs = self.transfers.lock();
+                    let last = jobs.last().expect("Retried transfer job");
+                    assert_eq!(*last.status.lock(), crate::sftp::TransferStatus::Done);
+                    assert_eq!(last.done.load(std::sync::atomic::Ordering::Relaxed), 5);
+                }
+                _ => {}
+            }
+        }
         let qa = self.qa.as_mut().unwrap();
         qa.frames += 1;
         if qa.steps[qa.step] == "interactive" {
@@ -218,10 +259,54 @@ impl App {
     }
 
     fn qa_apply(&mut self, step: &str) {
+        self.bridge
+            .ctx
+            .send_viewport_cmd(egui::ViewportCommand::Focus);
         self.dialog = None;
         self.editor = None;
         self.palette.open = false;
+        self.host_inspector_open = false;
         match step {
+            "wide" => self
+                .bridge
+                .ctx
+                .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1440.0, 900.0))),
+            "narrow" => self
+                .bridge
+                .ctx
+                .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1024.0, 768.0))),
+            "minimum" => self
+                .bridge
+                .ctx
+                .send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(760.0, 480.0))),
+            "compact" => {
+                self.active_tab = None;
+                self.page = Page::Hosts;
+                self.vault.settings.hosts_compact = true;
+            }
+            "comfortable" => {
+                self.vault.settings.hosts_compact = false;
+            }
+            "inspector" => {
+                self.active_tab = None;
+                self.page = Page::Hosts;
+                self.inspected_host = self.vault.hosts.first().map(|h| h.id);
+                self.host_inspector_open = true;
+            }
+            "quickconnect" => {
+                self.dialog = Some(crate::app::Dialog::QuickConnect {
+                    input: String::new(),
+                    error: None,
+                });
+            }
+            "emptyhosts" => {
+                self.active_tab = None;
+                self.page = Page::Hosts;
+                self.vault.hosts.clear();
+                self.vault.groups.clear();
+                self.inspected_host = None;
+            }
+
             "interactive" => {}
             "about" => {
                 self.dialog = Some(crate::app::Dialog::About);
@@ -238,6 +323,9 @@ impl App {
                 self.updater.preview_notice();
             }
             "home" | "hosts" => {
+                self.search.clear();
+                self.tag_filter = None;
+                self.current_group = None;
                 self.active_tab = None;
                 self.page = Page::Hosts;
             }
@@ -299,8 +387,114 @@ impl App {
             "palette" => {
                 self.palette.open = true;
             }
-            "local" => self.open_local(),
-            "sftp" => self.open_sftp(None),
+            "local" => {
+                self.open_local();
+                if let Some(Tab::Terminal(tab)) = self.tabs.last() {
+                    if let Some(pane) = tab.panes.first() {
+                        pane.session.term.lock().feed(b"Ferrum visual QA session\r\nThese lines are fixture output for layout review.\r\n\r\n$ systemctl is-active nginx\r\n\x1b[32mactive\x1b[0m\r\n\r\n$ ");
+                    }
+                }
+            }
+            "sftp" => {
+                let directory = std::env::temp_dir().join("ferrum-qa-files");
+                if let Err(error) = std::fs::create_dir_all(directory.join("releases")) {
+                    log::warn!("QA directory: {error}");
+                }
+                for (name, content) in [
+                    ("deploy.sh", "#!/bin/sh\necho ready\n"),
+                    ("nginx.conf", "server { listen 8080; }\n"),
+                    ("README.md", "Ferrum visual QA files.\n"),
+                ] {
+                    if let Err(error) = std::fs::write(directory.join(name), content) {
+                        log::warn!("QA fixture: {error}");
+                    }
+                }
+                let mut left = crate::app::FsPane::new();
+                left.backend = Some(crate::sftp::Backend::Local);
+                let pane = left.id;
+                let id = crate::conn::next_id();
+                let mut right = crate::app::FsPane::new();
+                right.host_picker = true;
+                self.tabs.push(Tab::Sftp(crate::app::SftpTab {
+                    id,
+                    title: "File transfer".into(),
+                    left,
+                    right,
+                }));
+                self.active_tab = Some(id);
+                self.fs_navigate(pane, directory.to_string_lossy().to_string());
+            }
+            "transferfailed" => {
+                let root = std::env::temp_dir()
+                    .join(format!("ferrum-qa-transfer-{}", uuid::Uuid::new_v4()));
+                let destination = root.join("uploads");
+                if let Err(error) = std::fs::create_dir_all(&destination) {
+                    log::warn!("QA transfer directory: {error}");
+                }
+                self.queue_file_transfer(crate::ui::sftp_view::TransferRetry {
+                    source: crate::sftp::Backend::Local,
+                    entry: crate::sftp::FileEntry {
+                        name: "release.tar.gz".into(),
+                        path: root.join("release.tar.gz").to_string_lossy().into(),
+                        is_dir: false,
+                        is_link: false,
+                        size: 0,
+                        mtime: None,
+                        perms: None,
+                        owner: String::new(),
+                    },
+                    destination: crate::sftp::Backend::Local,
+                    directory: destination.to_string_lossy().into(),
+                    pane: u64::MAX,
+                });
+            }
+            "hostkeys" => {
+                self.active_tab = None;
+                self.page = Page::Hosts;
+                self.search.clear();
+                self.current_group = None;
+                self.tag_filter = None;
+                if let Some(host) = self.filtered_hosts().first() {
+                    self.inspected_host = Some(host.id);
+                    self.bridge.ctx.memory_mut(|memory| {
+                        memory.request_focus(egui::Id::unique(("host-row", host.id)))
+                    });
+                }
+                if let Some(qa) = self.qa.as_mut() {
+                    for pressed in [true, false] {
+                        qa.keys.push(egui::Event::Key {
+                            key: egui::Key::ArrowDown,
+                            physical_key: Some(egui::Key::ArrowDown),
+                            pressed,
+                            repeat: false,
+                            modifiers: egui::Modifiers::NONE,
+                        });
+                    }
+                }
+            }
+            "filtered" => {
+                self.active_tab = None;
+                self.page = Page::Hosts;
+                self.current_group = self.vault.groups.first().map(|group| group.id);
+                self.search = "deploy".into();
+                self.tag_filter = Some("web".into());
+            }
+            "retrytransfer" => {
+                let id = self
+                    .transfers
+                    .lock()
+                    .iter()
+                    .find(|transfer| *transfer.status.lock() == crate::sftp::TransferStatus::Failed)
+                    .map(|transfer| transfer.id);
+                if let Some(id) = id {
+                    if let Some(request) = self.transfer_retries.get(&id) {
+                        if let Err(error) = std::fs::write(&request.entry.path, b"ready") {
+                            log::warn!("QA source file: {error}");
+                        }
+                    }
+                    self.retry_file_transfer(id);
+                }
+            }
             "serial" => {
                 self.dialog = Some(crate::app::Dialog::Serial {
                     cfg: Default::default(),
@@ -360,6 +554,8 @@ impl App {
                     t.side_panel = Some(crate::app::SidePanel::Containers);
                 }
             }
+            "dark" => self.vault.settings.ui_theme = crate::model::UiTheme::Dark,
+            "midnight" => self.vault.settings.ui_theme = crate::model::UiTheme::Midnight,
             "light" => {
                 self.vault.settings.ui_theme = crate::model::UiTheme::Light;
             }

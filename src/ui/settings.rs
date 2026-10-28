@@ -12,7 +12,7 @@ const SECTIONS: [&str; 9] = [
     "Connections",
     "SFTP",
     "Security",
-    "Sync & Backup",
+    "Sync and backup",
     "Integrations",
     "AI assistant",
     "Updates",
@@ -22,23 +22,75 @@ impl App {
     pub fn settings_page(&mut self, ui: &mut egui::Ui) {
         let pal = self.pal();
         let before = self.vault.settings.clone();
-        ui.label(RichText::new("Settings").size(22.0).strong());
-        ui.add_space(10.0);
-        ui.horizontal_wrapped(|ui| {
-            for (i, s) in SECTIONS.iter().enumerate() {
-                if ui
-                    .selectable_label(self.settings_section == i as u8, *s)
-                    .clicked()
-                {
-                    self.settings_section = i as u8;
-                }
-            }
-        });
-        ui.add_space(10.0);
+        ui.label(
+            RichText::new("Settings")
+                .size(crate::themes::tokens::TITLE)
+                .strong(),
+        );
+        ui.label(
+            RichText::new("Preferences stay grouped and easy to revisit.")
+                .small()
+                .color(pal.text_dim),
+        );
+        ui.add_space(24.0);
+        if ui.available_width() < 700.0 {
+            egui::ComboBox::from_id_salt("settings-section")
+                .selected_text(SECTIONS[self.settings_section.min(8) as usize])
+                .show_ui(ui, |ui| {
+                    for (index, label) in SECTIONS.iter().enumerate() {
+                        ui.selectable_value(&mut self.settings_section, index as u8, *label);
+                    }
+                });
+            ui.add_space(16.0);
+            self.settings_content(ui);
+        } else {
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    Vec2::new(160.0, ui.available_height()),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        for (index, label) in SECTIONS.iter().enumerate() {
+                            if ui
+                                .add_sized(
+                                    [160.0, 36.0],
+                                    egui::Button::new(RichText::new(*label).size(12.0).color(
+                                        if self.settings_section == index as u8 {
+                                            pal.accent
+                                        } else {
+                                            pal.text_dim
+                                        },
+                                    ))
+                                    .fill(if self.settings_section == index as u8 {
+                                        pal.accent_soft
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    })
+                                    .frame(false),
+                                )
+                                .clicked()
+                            {
+                                self.settings_section = index as u8;
+                            }
+                        }
+                    },
+                );
+                ui.add_space(24.0);
+                ui.vertical(|ui| self.settings_content(ui));
+            });
+        }
+        if before != self.vault.settings {
+            crate::store::touch_settings(&mut self.vault);
+            self.mark_dirty();
+        }
+    }
+
+    fn settings_content(&mut self, ui: &mut egui::Ui) {
+        let pal = self.pal();
         egui::ScrollArea::vertical()
-            .auto_shrink(false)
+            .id_salt("settings-content")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.set_max_width(760.0);
+                ui.set_max_width(ui.available_width().min(760.0));
                 match self.settings_section {
                     0 => self.settings_appearance(ui),
                     1 => self.settings_terminal(ui),
@@ -50,21 +102,18 @@ impl App {
                     7 => self.settings_ai(ui),
                     _ => self.settings_updates(ui),
                 }
-                ui.add_space(20.0);
+                ui.add_space(24.0);
                 ui.label(
-                    RichText::new(format!(
-                        "Ferrum {} · vault at {}",
-                        env!("CARGO_PKG_VERSION"),
-                        self.store.path.display()
-                    ))
-                    .small()
-                    .color(pal.text_dim),
+                    RichText::new(format!("Ferrum {}", env!("CARGO_PKG_VERSION")))
+                        .small()
+                        .color(pal.text_dim),
+                );
+                ui.label(
+                    RichText::new(self.store.path.display().to_string())
+                        .small()
+                        .color(pal.text_dim),
                 );
             });
-        if before != self.vault.settings {
-            crate::store::touch_settings(&mut self.vault);
-            self.mark_dirty();
-        }
     }
 
     fn settings_updates(&mut self, ui: &mut egui::Ui) {
@@ -91,16 +140,89 @@ impl App {
         card_frame(pal).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new("Interface theme").strong());
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut s.ui_theme, UiTheme::Dark, "Dark");
-                ui.selectable_value(&mut s.ui_theme, UiTheme::Midnight, "Midnight (OLED)");
-                ui.selectable_value(&mut s.ui_theme, UiTheme::Light, "Light");
+            ui.label(
+                RichText::new("Terminal colors stay independent of the interface theme.")
+                    .small()
+                    .color(pal.text_dim),
+            );
+            ui.add_space(12.0);
+            ui.horizontal_wrapped(|ui| {
+                let width = ((ui.available_width() - 24.0) / 3.0).clamp(100.0, 200.0);
+                for (theme, label) in [
+                    (UiTheme::Dark, "Dark"),
+                    (UiTheme::Light, "Light"),
+                    (UiTheme::Midnight, "Midnight"),
+                ] {
+                    let colors = crate::themes::palette(theme, s.accent);
+                    let (rect, response) =
+                        ui.allocate_exact_size(Vec2::new(width, 100.0), egui::Sense::click());
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::Role::RadioButton,
+                            true,
+                            s.ui_theme == theme,
+                            label,
+                        )
+                    });
+                    ui.painter().rect(
+                        rect,
+                        8,
+                        pal.bg,
+                        Stroke::new(
+                            if s.ui_theme == theme || response.has_focus() {
+                                2.0
+                            } else {
+                                1.0
+                            },
+                            if s.ui_theme == theme || response.has_focus() {
+                                pal.accent
+                            } else {
+                                pal.control_border
+                            },
+                        ),
+                        egui::StrokeKind::Inside,
+                    );
+                    let preview = rect.shrink2(Vec2::new(8.0, 8.0));
+                    let preview = egui::Rect::from_min_max(
+                        preview.min,
+                        egui::pos2(preview.right(), preview.bottom() - 24.0),
+                    );
+                    ui.painter().rect_filled(preview, 4, colors.bg);
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_size(
+                            preview.min,
+                            Vec2::new(preview.width() * 0.24, preview.height()),
+                        ),
+                        4,
+                        colors.sidebar,
+                    );
+                    ui.painter().hline(
+                        (preview.left() + preview.width() * 0.32)..=(preview.right() - 8.0),
+                        preview.top() + 16.0,
+                        Stroke::new(2.0, colors.text_dim),
+                    );
+                    ui.painter().hline(
+                        (preview.left() + preview.width() * 0.32)..=(preview.right() - 16.0),
+                        preview.top() + 28.0,
+                        Stroke::new(2.0, colors.border),
+                    );
+                    ui.painter().text(
+                        rect.left_bottom() + Vec2::new(8.0, -16.0),
+                        egui::Align2::LEFT_CENTER,
+                        label,
+                        egui::FontId::proportional(12.0),
+                        pal.text,
+                    );
+                    if response.clicked() {
+                        s.ui_theme = theme;
+                    }
+                }
             });
             ui.add_space(6.0);
             ui.label(RichText::new("Accent color").strong());
             ui.horizontal(|ui| {
                 for c in [
-                    [99u8, 132, 255],
+                    crate::themes::DEFAULT_ACCENT,
                     [76, 211, 138],
                     [245, 166, 35],
                     [232, 93, 117],
@@ -128,6 +250,22 @@ impl App {
                     s.accent = [col.r(), col.g(), col.b()];
                 }
             });
+        });
+        ui.add_space(16.0);
+        card_frame(pal).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Library layout").strong());
+            ui.label(
+                RichText::new("Adjust row density without reducing text size.")
+                    .small()
+                    .color(pal.text_dim),
+            );
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Host rows");
+                ui.selectable_value(&mut s.hosts_compact, false, "Comfortable · 64 pt");
+                ui.selectable_value(&mut s.hosts_compact, true, "Compact · 48 pt");
+            });
+            ui.checkbox(&mut s.hosts_grid_view, "Use grid view");
         });
         ui.add_space(10.0);
         card_frame(pal).show(ui, |ui| {

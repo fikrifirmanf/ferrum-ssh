@@ -28,10 +28,10 @@ pub fn schemes() -> Vec<TermScheme> {
     vec![
         scheme!(
             "Ferrum Night",
-            0x12141c,
-            0xd7dae0,
-            0x7c9cff,
-            0x2e3550,
+            0x10141a,
+            0xeef1f6,
+            0x789aff,
+            0x243450,
             [
                 0x1b1e28, 0xff5f6d, 0x5fd38d, 0xf5c86a, 0x6e9bff, 0xc58cff, 0x5ad4e6, 0xc8ccd6,
                 0x4b5168, 0xff7a85, 0x7ce3a5, 0xffd98a, 0x8fb2ff, 0xd5a8ff, 0x7fe2f0, 0xffffff
@@ -300,62 +300,115 @@ pub fn readable_on(bg: Color32) -> Color32 {
     }
 }
 
-pub fn palette(theme: UiTheme, accent: [u8; 3]) -> Palette {
-    let accent = Color32::from_rgb(accent[0], accent[1], accent[2]);
-    let soft = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 40);
-    let on_accent = readable_on(accent);
-    match theme {
-        UiTheme::Dark => Palette {
-            bg: h(0x17191e),
-            sidebar: h(0x121419),
-            panel: h(0x202329),
-            card: h(0x252930),
-            card_hover: h(0x30353e),
-            border: h(0x3c424d),
-            text: h(0xe6e8ef),
-            text_dim: h(0xa6afbf),
-            accent,
-            accent_soft: soft,
-            danger: h(0xff5f6d),
-            success: h(0x4cd38a),
-            warning: h(0xf5c86a),
-            on_accent,
-            control_border: h(0x6a7390),
-        },
-        UiTheme::Midnight => Palette {
-            bg: h(0x0c0e12),
-            sidebar: h(0x090b0f),
-            panel: h(0x13161c),
-            card: h(0x191d25),
-            card_hover: h(0x232934),
-            border: h(0x343b49),
-            text: h(0xe2e5ee),
-            text_dim: h(0x9ba6ba),
-            accent,
-            accent_soft: soft,
-            danger: h(0xff5f6d),
-            success: h(0x4cd38a),
-            warning: h(0xf5c86a),
-            on_accent,
-            control_border: h(0x6a7390),
-        },
-        UiTheme::Light => Palette {
-            bg: h(0xf4f5f7),
-            sidebar: h(0xe9ecf1),
-            panel: h(0xffffff),
-            card: h(0xffffff),
-            card_hover: h(0xf0f2f8),
-            border: h(0xd5dae3),
-            text: h(0x1e2230),
-            text_dim: h(0x4f5869),
-            accent,
-            accent_soft: soft,
-            danger: h(0xd92d3a),
-            success: h(0x12703b),
-            warning: h(0x8a5a0f),
-            on_accent,
-            control_border: h(0x8590a6),
-        },
+/// Accent text and focus must remain readable in the current interface theme.
+/// Stored RGB preferences are unchanged; the rendered tone adapts to its surface.
+fn accent_on(color: Color32, background: Color32, ink: Color32) -> Color32 {
+    let mut result = color;
+    for _ in 0..24 {
+        if contrast_ratio(result, background) >= 4.5 {
+            break;
+        }
+        result = result.lerp_to_gamma(ink, 0.1);
+    }
+    result
+}
+
+fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+    fn lum(c: Color32) -> f32 {
+        let f = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+    }
+    let (a, b) = (lum(a), lum(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+pub const DEFAULT_ACCENT: [u8; 3] = [120, 154, 255];
+
+/// Reusable Workbench geometry, in egui points.
+pub mod tokens {
+    pub const CONTROL: f32 = 36.0;
+    pub const PAGE: i8 = 24;
+    pub const INSET: i8 = 16;
+    pub const RADIUS: u8 = 8;
+    pub const TITLE: f32 = 24.0;
+    pub const BODY: f32 = 14.0;
+    pub const CAPTION: f32 = 12.0;
+    pub const SIDEBAR: f32 = 208.0;
+    pub const RAIL: f32 = 64.0;
+    pub const INSPECTOR: f32 = 288.0;
+    pub const ROW: f32 = 64.0;
+    pub const COMPACT_ROW: f32 = 48.0;
+}
+
+pub fn palette(theme: UiTheme, rgb: [u8; 3]) -> Palette {
+    let (
+        bg,
+        sidebar,
+        panel,
+        hover,
+        border,
+        text,
+        dim,
+        control,
+        success,
+        warning,
+        danger,
+        selection,
+    ) = match theme {
+        UiTheme::Dark => (
+            0x171b22, 0x12161c, 0x202630, 0x293240, 0x343e4d, 0xeef1f6, 0xa9b3c2, 0x65758b,
+            0x6fcf9e, 0xe5bc75, 0xf18c96, 0x243450,
+        ),
+        UiTheme::Midnight => (
+            0x0c1016, 0x080b10, 0x141a23, 0x202b3a, 0x303c4d, 0xeef1f6, 0xa9b3c2, 0x65758b,
+            0x6fcf9e, 0xe5bc75, 0xf18c96, 0x1c2d49,
+        ),
+        UiTheme::Light => (
+            0xf4f6f9, 0xe9edf3, 0xffffff, 0xe6ebf3, 0xd0d7e2, 0x19212d, 0x566171, 0x7a879a,
+            0x176c45, 0x815610, 0xb72e43, 0xdee7fc,
+        ),
+    };
+    let raw = if theme == UiTheme::Light && rgb == DEFAULT_ACCENT {
+        h(0x315ccb)
+    } else {
+        Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+    };
+    let accent = accent_on(raw, h(hover), h(text));
+    let mut soft = if rgb == DEFAULT_ACCENT {
+        h(selection)
+    } else {
+        h(bg).lerp_to_gamma(accent, 0.12)
+    };
+    // Dark custom accents can make a light selection too dark for secondary text.
+    for _ in 0..24 {
+        if contrast_ratio(h(dim), soft) >= 4.5 && contrast_ratio(accent, soft) >= 4.5 {
+            break;
+        }
+        soft = soft.lerp_to_gamma(h(bg), 0.2);
+    }
+    Palette {
+        bg: h(bg),
+        sidebar: h(sidebar),
+        panel: h(panel),
+        card: h(panel),
+        card_hover: h(hover),
+        border: h(border),
+        text: h(text),
+        text_dim: h(dim),
+        accent,
+        accent_soft: soft,
+        danger: h(danger),
+        success: h(success),
+        warning: h(warning),
+        on_accent: readable_on(accent),
+        control_border: h(control),
     }
 }
 
@@ -368,47 +421,47 @@ pub fn apply_style(ctx: &egui::Context, theme: UiTheme, accent: [u8; 3]) {
     };
     v.panel_fill = p.bg;
     v.window_fill = p.panel;
-    v.extreme_bg_color = if theme == UiTheme::Light {
-        h(0xf0f2f7)
-    } else {
-        h(0x0f1117)
-    };
+    v.extreme_bg_color = p.bg;
     v.faint_bg_color = p.card;
     v.override_text_color = Some(p.text);
     v.hyperlink_color = p.accent;
-    v.selection.bg_fill = p.accent.gamma_multiply(0.55);
-    v.selection.stroke = Stroke::new(1.0, p.accent);
-    v.window_corner_radius = CornerRadius::same(16);
-    v.menu_corner_radius = CornerRadius::same(10);
+    v.selection.bg_fill = p.accent_soft;
+    v.selection.stroke = Stroke::new(2.0, p.accent);
+    v.window_corner_radius = CornerRadius::same(12);
+    v.menu_corner_radius = CornerRadius::same(tokens::RADIUS);
     v.window_stroke = Stroke::new(1.0, p.border);
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
     v.widgets.noninteractive.bg_fill = p.card;
-    v.widgets.noninteractive.corner_radius = CornerRadius::same(10);
+    v.widgets.noninteractive.corner_radius = CornerRadius::same(tokens::RADIUS);
     v.widgets.inactive.bg_fill = p.card;
     v.widgets.inactive.weak_bg_fill = p.card;
     v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.control_border);
-    v.widgets.inactive.corner_radius = CornerRadius::same(10);
+    v.widgets.inactive.corner_radius = CornerRadius::same(tokens::RADIUS);
     v.widgets.hovered.bg_fill = p.card_hover;
     v.widgets.hovered.weak_bg_fill = p.card_hover;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent.gamma_multiply(0.7));
-    v.widgets.hovered.corner_radius = CornerRadius::same(10);
-    v.widgets.active.bg_fill = p.accent.gamma_multiply(0.8);
-    v.widgets.active.weak_bg_fill = p.accent.gamma_multiply(0.8);
-    v.widgets.active.corner_radius = CornerRadius::same(10);
-    v.widgets.open.corner_radius = CornerRadius::same(10);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
+    v.widgets.hovered.corner_radius = CornerRadius::same(tokens::RADIUS);
+    v.widgets.active.bg_fill = p.accent_soft;
+    v.widgets.active.weak_bg_fill = p.accent_soft;
+    v.widgets.active.corner_radius = CornerRadius::same(tokens::RADIUS);
+    v.widgets.open.corner_radius = CornerRadius::same(tokens::RADIUS);
     ctx.set_visuals(v);
     ctx.global_style_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 8.0);
         s.spacing.button_padding = egui::vec2(12.0, 6.0);
-        s.spacing.interact_size.y = 30.0;
+        s.spacing.interact_size.y = tokens::CONTROL;
         s.text_styles
             .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
         s.text_styles
             .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
-        s.text_styles
-            .insert(egui::TextStyle::Heading, egui::FontId::proportional(22.0));
-        s.text_styles
-            .insert(egui::TextStyle::Small, egui::FontId::proportional(12.5));
+        s.text_styles.insert(
+            egui::TextStyle::Heading,
+            egui::FontId::proportional(tokens::TITLE),
+        );
+        s.text_styles.insert(
+            egui::TextStyle::Small,
+            egui::FontId::proportional(tokens::CAPTION),
+        );
     });
 }
 
@@ -453,14 +506,55 @@ mod contrast_tests {
     }
 
     #[test]
+    fn custom_accent_text_and_focus_adapt_without_changing_saved_rgb() {
+        for theme in [UiTheme::Dark, UiTheme::Light, UiTheme::Midnight] {
+            for rgb in [
+                DEFAULT_ACCENT,
+                [99, 132, 255],
+                [255, 255, 255],
+                [0, 0, 0],
+                [245, 166, 35],
+                [60, 60, 200],
+            ] {
+                let palette = palette(theme, rgb);
+                assert!(
+                    ratio(palette.accent, palette.card) >= 4.5,
+                    "{theme:?} {rgb:?}"
+                );
+                for surface in [
+                    palette.bg,
+                    palette.sidebar,
+                    palette.card_hover,
+                    palette.accent_soft,
+                ] {
+                    assert!(
+                        ratio(palette.accent, surface) >= 4.5,
+                        "accent across surfaces: {theme:?} {rgb:?}"
+                    );
+                }
+                assert!(
+                    ratio(palette.on_accent, palette.accent) >= 4.5,
+                    "button: {theme:?} {rgb:?}"
+                );
+                assert!(
+                    ratio(palette.text_dim, palette.accent_soft) >= 4.5,
+                    "selection: {theme:?} {rgb:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn text_meets_aa_on_every_surface_in_every_theme() {
         for theme in [UiTheme::Dark, UiTheme::Midnight, UiTheme::Light] {
-            let p = palette(theme, [99, 132, 255]);
+            let p = palette(theme, DEFAULT_ACCENT);
             for (name, surface) in [
                 ("bg", p.bg),
                 ("sidebar", p.sidebar),
                 ("panel", p.panel),
                 ("card", p.card),
+                ("hover", p.card_hover),
+                ("selected", p.accent_soft),
             ] {
                 for (tn, text) in [("text", p.text), ("text_dim", p.text_dim)] {
                     let r = ratio(text, surface);

@@ -12,6 +12,16 @@ use crate::model::Protocol;
 use crate::sftp::{Backend, FileEntry, SftpEvent, TransferStatus, human_size, perms_string};
 use crate::themes::Palette;
 
+/// Replay the exact original locations, even if a pane has since navigated elsewhere.
+#[derive(Clone)]
+pub struct TransferRetry {
+    pub(crate) source: Backend,
+    pub(crate) entry: FileEntry,
+    pub(crate) destination: Backend,
+    pub(crate) directory: String,
+    pub(crate) pane: u64,
+}
+
 enum FsAction {
     Navigate(u64, String),
     Back(u64),
@@ -33,7 +43,7 @@ enum FsAction {
     OpenLocal(String),
 }
 
-const ROW_H: f32 = 26.0;
+const ROW_H: f32 = 36.0;
 
 impl App {
     pub fn sftp_tab(&mut self, ui: &mut egui::Ui, idx: usize) {
@@ -58,45 +68,92 @@ impl App {
             .frame(
                 egui::Frame::new()
                     .fill(pal.bg)
-                    .inner_margin(egui::Margin::same(10)),
+                    .inner_margin(egui::Margin::same(24)),
             )
             .show(ui, |ui| {
-                let full = ui.available_rect_before_wrap();
-                let gap = 10.0;
-                let w = (full.width() - gap) / 2.0;
-                let lrect = Rect::from_min_size(full.min, Vec2::new(w, full.height()));
-                let rrect = Rect::from_min_size(
-                    Pos2::new(full.left() + w + gap, full.top()),
-                    Vec2::new(w, full.height()),
+                ui.label(
+                    RichText::new("File transfer")
+                        .size(crate::themes::tokens::TITLE)
+                        .strong(),
                 );
-                let left_sel = selected_entries(&tab.left);
-                let right_sel = selected_entries(&tab.right);
-                ui.scope_builder(egui::UiBuilder::new().max_rect(lrect), |ui| {
-                    fs_pane(
-                        ui,
-                        &mut tab.left,
-                        right_id,
-                        &right_sel,
-                        &hosts,
-                        show_hidden,
-                        pal,
-                        &mut actions,
-                        &mut toggle_hidden,
-                    );
-                });
-                ui.scope_builder(egui::UiBuilder::new().max_rect(rrect), |ui| {
-                    fs_pane(
-                        ui,
-                        &mut tab.right,
-                        left_id,
-                        &left_sel,
-                        &hosts,
-                        show_hidden,
-                        pal,
-                        &mut actions,
-                        &mut toggle_hidden,
-                    );
-                });
+                ui.label(
+                    RichText::new("Select files, then choose their destination.")
+                        .small()
+                        .color(pal.text_dim),
+                );
+                ui.add_space(16.0);
+                let narrow = ui.ctx().content_rect().width() < 900.0;
+                let key = egui::Id::unique(("sftp-visible-pane", tab.id));
+                let mut right_visible = ui.data(|d| d.get_temp::<bool>(key).unwrap_or(false));
+                if narrow {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(!right_visible, "Left location")
+                            .clicked()
+                        {
+                            right_visible = false;
+                        }
+                        if ui
+                            .selectable_label(right_visible, "Right location")
+                            .clicked()
+                        {
+                            right_visible = true;
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.data_mut(|d| d.insert_temp(key, right_visible));
+                }
+                let full = ui.available_rect_before_wrap();
+                let width = if narrow {
+                    full.width()
+                } else {
+                    full.width() / 2.0
+                };
+                let left_rect = Rect::from_min_size(full.min, Vec2::new(width, full.height()));
+                let right_rect = if narrow {
+                    left_rect
+                } else {
+                    Rect::from_min_size(
+                        Pos2::new(full.left() + width, full.top()),
+                        Vec2::new(width, full.height()),
+                    )
+                };
+                let left_selected = selected_entries(&tab.left);
+                let right_selected = selected_entries(&tab.right);
+                let left_backend = tab.left.backend.clone();
+                let right_backend = tab.right.backend.clone();
+                if !narrow || !right_visible {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(left_rect), |ui| {
+                        fs_pane(
+                            ui,
+                            &mut tab.left,
+                            right_id,
+                            &right_selected,
+                            right_backend.as_ref(),
+                            &hosts,
+                            show_hidden,
+                            pal,
+                            &mut actions,
+                            &mut toggle_hidden,
+                        )
+                    });
+                }
+                if !narrow || right_visible {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(right_rect), |ui| {
+                        fs_pane(
+                            ui,
+                            &mut tab.right,
+                            left_id,
+                            &left_selected,
+                            left_backend.as_ref(),
+                            &hosts,
+                            show_hidden,
+                            pal,
+                            &mut actions,
+                            &mut toggle_hidden,
+                        )
+                    });
+                }
             });
 
         if toggle_hidden {
@@ -169,22 +226,14 @@ impl App {
                     self.toast("Open a location on the other side first", true);
                     return;
                 };
-                for e in entries {
-                    let bridge = self.bridge.clone();
-                    let name = e.name.clone();
-                    crate::sftp::start_transfer(
-                        self.rt.handle(),
-                        &self.transfers,
-                        src.clone(),
-                        e,
-                        dst.clone(),
-                        dir.clone(),
-                        self.bridge.ctx.clone(),
-                        move |res| {
-                            let result = res.map(|_| format!("Copied {name}"));
-                            bridge.send(AppEvent::Sftp(SftpEvent::OpDone { pane: to, result }));
-                        },
-                    );
+                for entry in entries {
+                    self.queue_file_transfer(TransferRetry {
+                        source: src.clone(),
+                        entry,
+                        destination: dst.clone(),
+                        directory: dir.clone(),
+                        pane: to,
+                    });
                 }
                 self.show_transfers = true;
             }
@@ -257,19 +306,56 @@ impl App {
         });
     }
 
+    pub(crate) fn queue_file_transfer(&mut self, request: TransferRetry) {
+        let bridge = self.bridge.clone();
+        let name = request.entry.name.clone();
+        let pane = request.pane;
+        let id = crate::sftp::start_transfer(
+            self.rt.handle(),
+            &self.transfers,
+            request.source.clone(),
+            request.entry.clone(),
+            request.destination.clone(),
+            request.directory.clone(),
+            self.bridge.ctx.clone(),
+            move |result| {
+                bridge.send(AppEvent::Sftp(SftpEvent::OpDone {
+                    pane,
+                    result: result.map(|_| format!("Copied {name}")),
+                }));
+            },
+        );
+        self.transfer_retries.insert(id, request);
+        self.show_transfers = true;
+    }
+
+    pub(crate) fn retry_file_transfer(&mut self, id: u64) {
+        if let Some(request) = self.transfer_retries.remove(&id) {
+            self.queue_file_transfer(request);
+        }
+    }
+
     pub fn transfers_drawer(&mut self, ui: &mut egui::Ui) {
         let pal = self.pal();
         let list: Vec<_> = self.transfers.lock().iter().rev().cloned().collect();
         let mut clear = false;
         let mut hide = false;
+        let mut retry = None;
+        // Successful jobs no longer need to retain their source/destination handles.
+        let retryable: std::collections::HashSet<_> = list
+            .iter()
+            .filter(|t| *t.status.lock() != TransferStatus::Done)
+            .map(|t| t.id)
+            .collect();
+        self.transfer_retries.retain(|id, _| retryable.contains(id));
         egui::Panel::bottom("transfers")
             .resizable(true)
-            .default_size(180.0)
-            .size_range(90.0..=420.0)
+            .default_size((ui.ctx().content_rect().height()*0.28).clamp(90.0,180.0))
+            .size_range(90.0..=(ui.ctx().content_rect().height()*0.4).clamp(90.0,420.0))
             .frame(egui::Frame::new().fill(pal.panel).stroke(Stroke::new(1.0, pal.border)).inner_margin(egui::Margin::symmetric(14, 8)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Transfers").strong());
+                    ui.label(RichText::new("Transfer queue").strong());
                     ui.label(RichText::new(format!("{}", list.len())).small().color(pal.text_dim));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.add(ghost_button("×")).on_hover_text("Hide").clicked() {
@@ -287,44 +373,36 @@ impl App {
                 }
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     for t in &list {
-                        let status = *t.status.lock();
-                        let total = t.total.load(Ordering::Relaxed);
-                        let done = t.done.load(Ordering::Relaxed);
-                        let frac = if total > 0 { (done as f32 / total as f32).clamp(0.0, 1.0) } else if status == TransferStatus::Done { 1.0 } else { 0.0 };
-                        ui.horizontal(|ui| {
-                            let (icon, color) = match status {
-                                TransferStatus::Queued => ("\u{E224}", pal.text_dim),
-                                TransferStatus::Running => ("\u{E098}", pal.accent),
-                                TransferStatus::Done => ("\u{E182}", pal.success),
-                                TransferStatus::Failed => ("\u{E4F6}", pal.danger),
-                                TransferStatus::Cancelled => ("\u{E3DE}", pal.warning),
-                            };
-                            ui.label(RichText::new(icon).color(color));
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(&t.name).strong());
-                                ui.label(RichText::new(format!("{}  →  {}", t.from, t.to)).small().color(pal.text_dim));
-                            });
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if status == TransferStatus::Running || status == TransferStatus::Queued {
-                                    if ui.small_button("Cancel").clicked() {
-                                        t.cancel.store(true, Ordering::Relaxed);
-                                    }
-                                }
-                                let secs = t.started.elapsed().as_secs_f64().max(0.001);
-                                let rate = done as f64 / secs;
-                                let detail = match status {
-                                    TransferStatus::Failed => t.error.lock().clone().unwrap_or_else(|| "failed".into()),
-                                    TransferStatus::Running => format!("{} / {}  ·  {}/s", human_size(done), human_size(total), human_size(rate as u64)),
-                                    _ => human_size(total.max(done)),
-                                };
-                                ui.label(RichText::new(detail).small().color(if status == TransferStatus::Failed { pal.danger } else { pal.text_dim }));
-                                ui.add(egui::ProgressBar::new(frac).desired_width(160.0).fill(color));
+                        let status=*t.status.lock();
+                        let total=t.total.load(Ordering::Relaxed);let done=t.done.load(Ordering::Relaxed);
+                        let fraction=if total>0{(done as f32/total as f32).clamp(0.0,1.0)}else if status==TransferStatus::Done{1.0}else{0.0};
+                        let (label,color)=match status{
+                            TransferStatus::Queued=>("Queued",pal.text_dim),TransferStatus::Running=>("Transferring",pal.accent),TransferStatus::Done=>("Completed",pal.success),TransferStatus::Failed=>("Failed",pal.danger),TransferStatus::Cancelled=>("Cancelled",pal.warning)
+                        };
+                        ui.horizontal(|ui|{
+                            ui.label(RichText::new(label).small().color(color));
+                            ui.add(egui::Label::new(RichText::new(&t.name).strong()).truncate()).on_hover_text(&t.name);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                                if matches!(status,TransferStatus::Running|TransferStatus::Queued)&&ui.small_button("Cancel transfer").clicked(){t.cancel.store(true,Ordering::Relaxed);}
+                                if matches!(status,TransferStatus::Failed|TransferStatus::Cancelled)&&self.transfer_retries.contains_key(&t.id)&&ui.small_button("Retry transfer").clicked(){retry=Some(t.id);}
                             });
                         });
-                        ui.add_space(4.0);
+                        let path=format!("{} → {}",t.from,t.to);
+                        ui.add(egui::Label::new(RichText::new(&path).small().color(pal.text_dim)).truncate()).on_hover_text(path);
+                        ui.add(egui::ProgressBar::new(fraction).show_percentage().desired_width(ui.available_width()).fill(color));
+                        let detail=match status{
+                            TransferStatus::Failed=>t.error.lock().clone().unwrap_or_else(||"Transfer failed. Retry or check both locations.".into()),
+                            TransferStatus::Running=>format!("{} / {} · {}/s",human_size(done),human_size(total),human_size((done as f64/t.started.elapsed().as_secs_f64().max(0.001))as u64)),
+                            _=>format!("{} / {}",human_size(done),human_size(total.max(done))),
+                        };
+                        ui.add(egui::Label::new(RichText::new(detail).small().color(if status==TransferStatus::Failed{pal.danger}else{pal.text_dim})).wrap());
+                        ui.add_space(8.0);ui.separator();
                     }
                 });
             });
+        if let Some(id) = retry {
+            self.retry_file_transfer(id);
+        }
         if clear {
             self.transfers.lock().retain(|t| {
                 matches!(
@@ -332,6 +410,11 @@ impl App {
                     TransferStatus::Running | TransferStatus::Queued
                 )
             });
+        }
+        if clear {
+            let retained: std::collections::HashSet<_> =
+                self.transfers.lock().iter().map(|t| t.id).collect();
+            self.transfer_retries.retain(|id, _| retained.contains(id));
         }
         if hide {
             self.show_transfers = false;
@@ -385,6 +468,7 @@ fn fs_pane(
     p: &mut FsPane,
     other_id: u64,
     other_selected: &[FileEntry],
+    other_backend: Option<&Backend>,
     hosts: &[(Uuid, String, String)],
     show_hidden: bool,
     pal: Palette,
@@ -395,8 +479,8 @@ fn fs_pane(
     egui::Frame::new()
         .fill(pal.panel)
         .stroke(Stroke::new(1.0, pal.border))
-        .corner_radius(10)
-        .inner_margin(egui::Margin::same(10))
+        .corner_radius(0)
+        .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
             ui.set_min_size(ui.available_size());
 
@@ -475,7 +559,7 @@ fn fs_pane(
 
             // ----- Navigation bar -----
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(!p.back.is_empty(), egui::Button::new("←"))
                     .on_hover_text("Back")
@@ -508,7 +592,7 @@ fn fs_pane(
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut p.path_edit)
                         .font(egui::TextStyle::Monospace)
-                        .desired_width(ui.available_width() - 150.0),
+                        .desired_width((ui.available_width() - 160.0).max(80.0)),
                 );
                 if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     actions.push(FsAction::Navigate(id, p.path_edit.trim().to_string()));
@@ -520,17 +604,25 @@ fn fs_pane(
                 );
             });
 
-            // ----- Action bar -----
+            // ----- Directional actions -----
             let selected = selected_entries(p);
-            ui.horizontal(|ui| {
-                let other_side = if backend.is_local() {
-                    "Upload"
-                } else {
-                    "Download"
+            ui.horizontal_wrapped(|ui| {
+                let direction = match (backend.is_local(), other_backend.map(Backend::is_local)) {
+                    (true, Some(false)) => "Upload selected",
+                    (false, Some(true)) => "Download selected",
+                    _ => "Copy selected",
                 };
-                let to_label = format!("{other_side} → other side ({})", selected.len());
+                let label = format!("{direction} ({})", selected.len());
                 if ui
-                    .add_enabled(!selected.is_empty(), primary_button(&to_label, pal))
+                    .add_enabled(
+                        !selected.is_empty() && other_backend.is_some(),
+                        primary_button(&label, pal),
+                    )
+                    .on_disabled_hover_text(if other_backend.is_none() {
+                        "Choose a destination in the other location first."
+                    } else {
+                        "Select one or more files first."
+                    })
                     .clicked()
                 {
                     actions.push(FsAction::Copy {
@@ -601,8 +693,20 @@ fn fs_pane(
             let entries = visible_entries(p, show_hidden);
             header_row(ui, p, pal);
             if p.loading && p.entries.is_empty() {
-                ui.add_space(10.0);
-                ui.spinner();
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading files…");
+                });
+            } else if entries.is_empty() {
+                ui.add_space(16.0);
+                ui.label(
+                    RichText::new(if p.filter.is_empty() {
+                        "This folder is empty."
+                    } else {
+                        "No files match the filter."
+                    })
+                    .color(pal.text_dim),
+                );
             }
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -919,6 +1023,7 @@ fn inline_forms(
             };
             ui.colored_label(
                 pal.danger,
+                // unslop-ignore NO_SQL_INTERPOLATION -- UI confirmation text for deleting selected files; no SQL is used.
                 format!("Delete {what}? Folders are removed with everything inside."),
             );
             if ui.add(danger_button("Delete", pal)).clicked() {
@@ -958,7 +1063,11 @@ fn header_row(ui: &mut egui::Ui, p: &mut FsPane, pal: Palette) {
     let pane_id = p.id;
     let mut click = |x0: f32, x1: f32, key: SortKey, label: &str, align_right: bool| {
         let r = Rect::from_x_y_ranges(x0..=x1.max(x0 + 1.0), rect.y_range());
-        let resp = ui.interact(r, ui.id().with(("hdr", pane_id, label)), Sense::click());
+        let resp = ui.interact(
+            r,
+            ui.scope_id().with(("hdr", pane_id, label)),
+            Sense::click(),
+        );
         let arrow = if p.sort == key {
             if p.sort_asc { " ▲" } else { " ▼" }
         } else {

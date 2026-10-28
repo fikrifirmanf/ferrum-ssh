@@ -13,6 +13,25 @@ pub fn terminal_family() -> FontFamily {
 
 pub fn install(ctx: &egui::Context, custom_path: &str) {
     let mut fonts = FontDefinitions::default();
+    // Prefer the platform UI face; egui's bundled proportional font remains the fallback.
+    #[cfg(target_os = "macos")]
+    let ui_path = "/System/Library/Fonts/SFNS.ttf".to_string();
+    #[cfg(target_os = "windows")]
+    let ui_path = std::env::var("WINDIR")
+        .map(|p| format!("{p}/Fonts/segoeui.ttf"))
+        .unwrap_or_default();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let ui_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf".to_string();
+    if let Ok(data) = std::fs::read(ui_path) {
+        fonts
+            .font_data
+            .insert("platform-ui".into(), Arc::new(FontData::from_owned(data)));
+        fonts
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .insert(0, "platform-ui".into());
+    }
     let mut term_list: Vec<String> = vec![];
     if !custom_path.trim().is_empty() {
         match std::fs::read(custom_path.trim()) {

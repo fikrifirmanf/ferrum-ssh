@@ -16,7 +16,11 @@ fn page_header(
 ) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.label(RichText::new(title).size(22.0).strong());
+            ui.label(
+                RichText::new(title)
+                    .size(crate::themes::tokens::TITLE)
+                    .strong(),
+            );
             ui.label(RichText::new(subtitle).color(pal.text_dim));
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), right);
@@ -26,10 +30,10 @@ fn page_header(
 
 fn row_frame(pal: crate::themes::Palette) -> egui::Frame {
     egui::Frame::new()
-        .fill(pal.card)
+        .fill(pal.bg)
         .stroke(Stroke::new(1.0, pal.border))
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::symmetric(14, 10))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(egui::Margin::symmetric(12, 12))
 }
 
 impl App {
@@ -39,7 +43,7 @@ impl App {
         page_header(
             ui,
             "Keychain",
-            "SSH keys, certificates and reusable identities — encrypted in your vault.",
+            "SSH keys, certificates, and reusable identities.",
             pal,
             |ui| {
                 ui.menu_button("Import \u{E136}", |ui| {
@@ -104,11 +108,11 @@ impl App {
             if self.vault.keys.is_empty() {
                 ui.label(RichText::new("No keys yet. Generate an ED25519 key or import one from ~/.ssh.").color(pal.text_dim));
             }
-            ui.horizontal_wrapped(|ui| {
+            ui.vertical(|ui| {
                 for k in self.vault.keys.iter().filter(|k| q.is_empty() || k.label.to_lowercase().contains(&q)) {
-                    let resp = card_frame(pal)
+                    let resp = row_frame(pal)
                         .show(ui, |ui| {
-                            ui.set_width(260.0);
+                            ui.set_width((ui.available_width()-32.0).max(200.0));
                             ui.horizontal(|ui| {
                                 super::avatar(ui, "\u{E2D6}", hash_color(&k.label), 34.0);
                                 ui.vertical(|ui| {
@@ -182,7 +186,7 @@ impl App {
         let mut toggle: Option<(PortForward, bool)> = None;
         page_header(
             ui,
-            "Port Forwarding",
+            "Port forwarding",
             "Local, remote and dynamic (SOCKS) tunnels over SSH.",
             pal,
             |ui| {
@@ -330,7 +334,7 @@ impl App {
         let mut delete: Option<Uuid> = None;
         page_header(
             ui,
-            "Known Hosts",
+            "Known hosts",
             "Server host keys you have trusted. Ferrum warns you when a key changes.",
             pal,
             |ui| {
@@ -345,10 +349,8 @@ impl App {
             .show(ui, |ui| {
                 if self.vault.known_hosts.is_empty() {
                     ui.label(
-                        RichText::new(
-                            "No trusted hosts yet — they are added the first time you connect.",
-                        )
-                        .color(pal.text_dim),
+                        RichText::new("Trusted server keys appear here after you connect.")
+                            .color(pal.text_dim),
                     );
                 }
                 egui::Grid::new("known-hosts")
@@ -448,7 +450,7 @@ impl App {
         let mut clear_history = false;
         page_header(
             ui,
-            "History & Logs",
+            "History and logs",
             "Commands you've run and every connection, with session recordings.",
             pal,
             |ui| {
@@ -595,7 +597,7 @@ fn snippet_card(
     run: &mut Option<Snippet>,
 ) {
     card_frame(pal).show(ui, |ui| {
-        ui.set_width(300.0);
+        ui.set_width((ui.available_width() - 32.0).max(200.0));
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&s.name).strong());
@@ -666,10 +668,10 @@ impl App {
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
+                ui.vertical(|ui| {
                     for w in &self.vault.workspaces {
-                        card_frame(pal).show(ui, |ui| {
-                            ui.set_width(300.0);
+                        row_frame(pal).show(ui, |ui| {
+                            ui.set_width((ui.available_width() - 32.0).max(200.0));
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new(&w.name).strong());

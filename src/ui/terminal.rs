@@ -120,174 +120,115 @@ impl App {
         };
         let tab_id = tab.id;
 
-        // ---------- Toolbar ----------
-        egui::Panel::top(egui::Id::new(("term-toolbar", tab_id)))
-            .exact_size(40.0)
+        // Session actions stay in a compact toolbar; shell input keeps its own keybindings.
+        egui::Panel::top(egui::Id::unique(("term-toolbar", tab_id)))
+            .exact_size(48.0)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.panel)
-                    .inner_margin(egui::Margin::symmetric(12, 4))
+                    .fill(pal.bg)
+                    .inner_margin(egui::Margin::symmetric(16, 6))
                     .stroke(Stroke::new(1.0, pal.border)),
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    if let Some(p) = tab.panes.get(tab.active) {
-                        let st = p.session.status.lock().clone();
-                        ui.label(RichText::new("●").color(status_color(&st, pal)));
-                        let t = &p.session.target;
-                        let addr = match t.protocol {
-                            crate::model::Protocol::Local => "local shell".to_string(),
-                            crate::model::Protocol::Serial => format!("serial {}", t.serial.device),
-                            _ => format!(
-                                "{}{}:{}",
-                                if t.username.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!("{}@", t.username)
-                                },
-                                t.address,
-                                t.port
-                            ),
-                        };
-                        ui.label(RichText::new(&t.label).strong());
-                        ui.label(
-                            RichText::new(format!("{} · {}", t.protocol.label(), addr))
-                                .small()
-                                .color(pal.text_dim),
-                        );
-                        match &st {
-                            Status::Connecting(m) => {
+                    if let Some(pane) = tab.panes.get(tab.active) {
+                        let status = pane.session.status.lock().clone();
+                        ui.label(RichText::new("●").color(status_color(&status, pal)));
+                        let target = &pane.session.target;
+                        ui.add(egui::Label::new(RichText::new(&target.label).strong()).truncate())
+                            .on_hover_text(format!(
+                                "{} · {}@{}:{}",
+                                target.protocol.label(),
+                                target.username,
+                                target.address,
+                                target.port
+                            ));
+                        if ui.ctx().content_rect().width() > 1100.0 {
+                            ui.label(
+                                RichText::new(target.protocol.label())
+                                    .small()
+                                    .color(pal.text_dim),
+                            );
+                        }
+                        match &status {
+                            Status::Connecting(message) => {
                                 ui.spinner();
-                                ui.label(RichText::new(m).small().color(pal.warning));
+                                ui.label(RichText::new(message).small().color(pal.warning));
                             }
-                            Status::Closed(_) | Status::Failed(_) => {
-                                if ui.button("\u{E036} Reconnect").clicked() {
-                                    actions.push(TermAction::Reconnect(p.session.id));
+                            Status::Failed(_) | Status::Closed(_) => {
+                                if ui.button("Reconnect").clicked() {
+                                    actions.push(TermAction::Reconnect(pane.session.id));
                                 }
                             }
                             _ => {}
                         }
-                        let bytes = p.session.term.lock().total_bytes;
-                        ui.label(
-                            RichText::new(crate::sftp::human_size(bytes))
-                                .small()
-                                .color(pal.text_dim),
-                        )
-                        .on_hover_text("Received");
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let toggle = |ui: &mut egui::Ui, icon: &str, tip: &str, on: bool| -> bool {
-                            let b = egui::Button::new(RichText::new(icon).color(if on {
-                                pal.accent
-                            } else {
-                                pal.text
-                            }))
-                            .fill(if on {
-                                pal.accent_soft
-                            } else {
-                                egui::Color32::TRANSPARENT
-                            })
-                            .min_size(Vec2::new(30.0, 28.0));
-                            ui.add(b).on_hover_text(tip).clicked()
-                        };
-                        if toggle(
-                            ui,
-                            "\u{E6A2}",
-                            "AI command assistant",
-                            tab.side_panel == Some(SidePanel::Ai),
-                        ) {
-                            tab.side_panel = if tab.side_panel == Some(SidePanel::Ai) {
-                                None
-                            } else {
-                                Some(SidePanel::Ai)
-                            };
-                        }
-                        if toggle(
-                            ui,
-                            "\u{E1A0}",
-                            "Command history",
-                            tab.side_panel == Some(SidePanel::History),
-                        ) {
-                            tab.side_panel = if tab.side_panel == Some(SidePanel::History) {
-                                None
-                            } else {
-                                Some(SidePanel::History)
-                            };
-                        }
-                        if toggle(
-                            ui,
-                            "\u{EAE0}",
-                            "Snippets",
-                            tab.side_panel == Some(SidePanel::Snippets),
-                        ) {
-                            tab.side_panel = if tab.side_panel == Some(SidePanel::Snippets) {
-                                None
-                            } else {
-                                Some(SidePanel::Snippets)
-                            };
-                        }
-                        if toggle(
-                            ui,
-                            crate::icons::MONITOR,
-                            "Server health",
-                            tab.side_panel == Some(SidePanel::Health),
-                        ) {
-                            tab.side_panel = if tab.side_panel == Some(SidePanel::Health) {
-                                None
-                            } else {
-                                Some(SidePanel::Health)
-                            };
-                        }
-                        if toggle(
-                            ui,
-                            crate::icons::PACKAGE,
-                            "Containers",
-                            tab.side_panel == Some(SidePanel::Containers),
-                        ) {
-                            tab.side_panel = if tab.side_panel == Some(SidePanel::Containers) {
-                                None
-                            } else {
-                                Some(SidePanel::Containers)
-                            };
-                        }
-                        ui.separator();
-                        if tab.panes.len() > 1
-                            && toggle(
-                                ui,
-                                "\u{E324}",
-                                "Broadcast input to all panes",
-                                tab.broadcast,
-                            )
-                        {
-                            tab.broadcast = !tab.broadcast;
-                        }
-                        if toggle(ui, "\u{E874}", "Split down (\u{E52E}⌘D)", false) {
-                            actions.push(TermAction::Split(SplitLayout::Vertical));
-                        }
-                        if toggle(ui, "\u{E870}", "Split right (⌘D)", false) {
-                            actions.push(TermAction::Split(SplitLayout::Horizontal));
-                        }
-                        if let Some(p) = tab.panes.get(tab.active) {
-                            if p.session.target.protocol == crate::model::Protocol::Ssh
-                                && toggle(ui, "\u{E098}", "Open SFTP for this host", false)
-                            {
-                                actions.push(TermAction::OpenSftp(p.session.target.host_id));
+                        ui.menu_button("\u{E1FE}", |ui| {
+                            if ui.button("Increase terminal font").clicked() {
+                                actions.push(TermAction::FontDelta(1.0));
+                                ui.close();
                             }
-                        }
-                        ui.separator();
-                        if ui
-                            .add(ghost_button("A+"))
-                            .on_hover_text("Bigger font (⌘+)")
-                            .clicked()
-                        {
-                            actions.push(TermAction::FontDelta(1.0));
-                        }
-                        if ui
-                            .add(ghost_button("A−"))
-                            .on_hover_text("Smaller font (⌘−)")
-                            .clicked()
-                        {
-                            actions.push(TermAction::FontDelta(-1.0));
+                            if ui.button("Decrease terminal font").clicked() {
+                                actions.push(TermAction::FontDelta(-1.0));
+                                ui.close();
+                            }
+                            if tab.panes.len() > 1 {
+                                ui.separator();
+                                ui.checkbox(&mut tab.broadcast, "Broadcast input to all panes");
+                            }
+                        })
+                        .response
+                        .on_hover_text("Terminal preferences");
+                        ui.menu_button("\u{E870}  Split", |ui| {
+                            if ui.button("Split right").clicked() {
+                                actions.push(TermAction::Split(SplitLayout::Horizontal));
+                                ui.close();
+                            }
+                            if ui.button("Split down").clicked() {
+                                actions.push(TermAction::Split(SplitLayout::Vertical));
+                                ui.close();
+                            }
+                            if ui.button("Add grid pane").clicked() {
+                                actions.push(TermAction::Split(SplitLayout::Grid));
+                                ui.close();
+                            }
+                        });
+                        ui.menu_button("\u{E32E}  Tools", |ui| {
+                            for (panel, label) in [
+                                (SidePanel::Health, "Server health"),
+                                (SidePanel::Containers, "Containers"),
+                                (SidePanel::Snippets, "Snippets"),
+                                (SidePanel::History, "Command history"),
+                                (SidePanel::Ai, "AI command help"),
+                            ] {
+                                if ui
+                                    .selectable_label(tab.side_panel == Some(panel), label)
+                                    .clicked()
+                                {
+                                    tab.side_panel = Some(panel);
+                                    ui.close();
+                                }
+                            }
+                            if tab.side_panel.is_some() {
+                                ui.separator();
+                                if ui.button("Close session tools").clicked() {
+                                    tab.side_panel = None;
+                                    ui.close();
+                                }
+                            }
+                        });
+                        if let Some(pane) = tab.panes.get(tab.active) {
+                            let ssh = pane.session.target.protocol == crate::model::Protocol::Ssh;
+                            if ui
+                                .add_enabled(ssh, egui::Button::new("\u{E0A0}  Files"))
+                                .on_disabled_hover_text(
+                                    "Open an SSH session to browse its remote files.",
+                                )
+                                .clicked()
+                            {
+                                actions.push(TermAction::OpenSftp(pane.session.target.host_id));
+                            }
                         }
                     });
                 });
@@ -350,11 +291,20 @@ impl App {
 
         // ---------- Side panel ----------
         if let Some(panel) = tab.side_panel {
-            egui::Panel::right(egui::Id::new(("term-side", tab_id)))
-                .default_size(320.0)
+            egui::Panel::right(egui::Id::unique(("term-side", tab_id)))
+                .default_size(288.0)
+                .size_range(240.0..=400.0)
                 .resizable(true)
                 .frame(egui::Frame::new().fill(pal.panel).inner_margin(egui::Margin::same(12)).stroke(Stroke::new(1.0, pal.border)))
-                .show(ui, |ui| match panel {
+                .show(ui, |ui| {
+                    ui.horizontal(|ui|{
+                        ui.label(RichText::new("SESSION TOOLS").small().color(pal.text_dim));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{if ui.add(ghost_button("×")).on_hover_text("Close session tools").clicked(){tab.side_panel=None;}});
+                    });
+                    ui.horizontal_wrapped(|ui|{
+                        for(next,label)in [(SidePanel::Health,"Health"),(SidePanel::Containers,"Containers"),(SidePanel::Snippets,"Snippets"),(SidePanel::History,"History"),(SidePanel::Ai,"AI")]{if ui.selectable_label(panel==next,label).clicked(){tab.side_panel=Some(next);}}
+                    });ui.separator();
+                    match panel {
                     SidePanel::Snippets => {
                         ui.label(RichText::new("Snippets").strong().size(16.0));
                         ui.add(egui::TextEdit::singleline(&mut tab.snippet_filter).hint_text("Filter").desired_width(f32::INFINITY));
@@ -489,9 +439,37 @@ impl App {
                             None => {}
                         }
                     }
+                    }
                 });
         }
 
+        if tab.broadcast && tab.panes.len() > 1 {
+            egui::Panel::top(egui::Id::unique(("broadcast-warning", tab_id)))
+                .frame(
+                    egui::Frame::new()
+                        .fill(pal.panel)
+                        .inner_margin(egui::Margin::symmetric(16, 8)),
+                )
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} Broadcast input: {}",
+                                crate::icons::BROADCAST,
+                                tab.panes
+                                    .iter()
+                                    .map(|p| p.session.target.label.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ))
+                            .color(pal.warning),
+                        );
+                        if ui.button("Stop broadcast").clicked() {
+                            tab.broadcast = false;
+                        }
+                    });
+                });
+        }
         // ---------- Panes ----------
         let mut close_pane = None;
         egui::CentralPanel::default()
@@ -714,24 +692,6 @@ impl App {
                     if let Some(p) = tab.panes.get(i) {
                         p.session.send(bytes);
                     }
-                }
-                if tab.broadcast && multi {
-                    let r = Rect::from_min_size(
-                        area.right_top() + Vec2::new(-200.0, 6.0),
-                        Vec2::new(190.0, 22.0),
-                    );
-                    ui.painter().rect_filled(
-                        r,
-                        CornerRadius::same(11),
-                        pal.warning.gamma_multiply(0.9),
-                    );
-                    ui.painter().text(
-                        r.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "\u{E324} Broadcasting to all panes",
-                        egui::FontId::proportional(11.5),
-                        egui::Color32::BLACK,
-                    );
                 }
             });
         if let Some(i) = close_pane {

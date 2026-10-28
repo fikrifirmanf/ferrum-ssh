@@ -1,4 +1,4 @@
-//! Slide-in editor panel for hosts, groups, identities, keys, port forwarding rules and snippets.
+//! Focused editor workspace for hosts, groups, identities, keys, port forwarding rules and snippets.
 
 use egui::{RichText, TextEdit};
 use uuid::Uuid;
@@ -231,11 +231,11 @@ impl App {
                 } else {
                     format!("Edit {}", title.to_lowercase())
                 })
-                .size(18.0)
+                .size(crate::themes::tokens::TITLE)
                 .strong(),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(super::ghost_button("×")).clicked()
+                if ui.add(super::ghost_button("Back to library")).clicked()
                     || ui.input(|i| i.key_pressed(egui::Key::Escape))
                 {
                     outcome = Outcome::Close;
@@ -250,7 +250,7 @@ impl App {
             52.0
         };
         egui::ScrollArea::vertical()
-            .max_height(ui.available_height() - footer_h)
+            .max_height((ui.available_height() - footer_h).max(80.0))
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 6.0;
@@ -271,13 +271,13 @@ impl App {
         }
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.add(primary_button("Save", pal)).clicked()
+            if ui.add(egui::Button::new("Save changes")).clicked()
                 || ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S))
             {
                 outcome = Outcome::Save;
             }
             if let Editor::Host(..) = ed {
-                if ui.button("Save & Connect").clicked() {
+                if ui.add(primary_button("Save and connect", pal)).clicked() {
                     outcome = Outcome::SaveAndConnect;
                 }
             }
@@ -335,15 +335,16 @@ impl App {
             }};
         }
         match ed {
-            Editor::Host(h, _) => {
+            Editor::Host(h, is_new) => {
                 if h.address.trim().is_empty() && h.protocol != Protocol::Serial {
-                    self.editor = Some(Editor::Host(h, false));
+                    self.editor = Some(Editor::Host(h, is_new));
                     return Err("Address is required".into());
                 }
                 let id = h.id;
                 let mut h = *h;
                 h.address = h.address.trim().to_string();
                 upsert!(self.vault.hosts, h);
+                self.inspected_host = Some(id);
                 if connect {
                     self.open_host(id);
                 }
@@ -450,7 +451,30 @@ impl App {
                 h.settings.port = port.trim().parse().ok();
             }
         });
-        self.credentials_form(ui, &mut h.settings, &inherited, pal, "host");
+        if matches!(h.protocol, Protocol::Ssh | Protocol::Mosh) {
+            let source = if h.group_id.is_some() {
+                self.vault.group_path(h.group_id)
+            } else {
+                "connection defaults".into()
+            };
+            ui.label(
+                RichText::new(format!("Unset values inherit from {source}."))
+                    .small()
+                    .color(pal.text_dim),
+            );
+            self.credentials_form(ui, &mut h.settings, &inherited, pal, "host");
+        } else {
+            section_title(ui, "Authentication", pal);
+            field(ui, "Username", pal);
+            opt_text(ui, &mut h.settings.username, &inherited.username, false);
+            field(ui, "Password", pal);
+            opt_text(ui, &mut h.settings.password, "Ask when connecting", true);
+            ui.label(
+                RichText::new("Telnet does not encrypt traffic. Use it on a trusted network.")
+                    .small()
+                    .color(pal.warning),
+            );
+        }
 
         if h.protocol == Protocol::Mosh {
             section_title(ui, "Mosh", pal);
@@ -495,7 +519,7 @@ impl App {
         pal: Palette,
         salt: &str,
     ) {
-        section_title(ui, "Credentials", pal);
+        section_title(ui, "Authentication", pal);
         let identities: Vec<(Uuid, String)> = self
             .vault
             .identities
@@ -1092,7 +1116,7 @@ impl App {
     }
 
     fn hotkey_field(&mut self, ui: &mut egui::Ui, s: &mut Snippet, pal: Palette) {
-        let rec_id = egui::Id::new(("hotkey-recording", s.id));
+        let rec_id = egui::Id::unique(("hotkey-recording", s.id));
         let mut recording = ui
             .memory(|m| m.data.get_temp::<bool>(rec_id))
             .unwrap_or(false);

@@ -505,6 +505,7 @@ pub struct Settings {
     pub azure_client_secret: String,
     pub azure_subscription: String,
     pub hosts_grid_view: bool,
+    pub hosts_compact: bool,
     /// Probe saved hosts so the vault shows whether they answer and how fast.
     pub show_host_status: bool,
     pub sidebar_collapsed: bool,
@@ -534,7 +535,7 @@ impl Default for Settings {
         Self {
             check_updates_on_startup: true,
             ui_theme: UiTheme::Dark,
-            accent: [99, 132, 255],
+            accent: crate::themes::DEFAULT_ACCENT,
             terminal_scheme: "Ferrum Night".into(),
             font_size: 14.0,
             custom_font_path: String::new(),
@@ -578,7 +579,8 @@ impl Default for Settings {
             azure_client_id: String::new(),
             azure_client_secret: String::new(),
             azure_subscription: String::new(),
-            hosts_grid_view: true,
+            hosts_grid_view: false,
+            hosts_compact: false,
             show_host_status: true,
             sidebar_collapsed: false,
             file_associations: vec![],
@@ -848,6 +850,19 @@ pub fn parse_quick_connect(s: &str) -> Option<(Option<String>, String, Option<u1
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workbench_defaults_preserve_existing_appearance_preferences() {
+        let settings:Settings=serde_json::from_str(r#"{"accent":[9,20,40],"hosts_grid_view":true,"terminal_scheme":"Nord","custom_font_path":"/tmp/mono.ttf"}"#).unwrap();
+        assert_eq!(settings.accent, [9, 20, 40]);
+        assert!(settings.hosts_grid_view);
+        assert!(!settings.hosts_compact);
+        assert_eq!(settings.terminal_scheme, "Nord");
+        assert_eq!(settings.custom_font_path, "/tmp/mono.ttf");
+        let defaults: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!defaults.hosts_grid_view);
+        assert_eq!(defaults.accent, crate::themes::DEFAULT_ACCENT);
+    }
 
     #[test]
     fn quick_connect_parsing() {

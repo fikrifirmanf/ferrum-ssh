@@ -53,6 +53,11 @@ fn main() -> eframe::Result<()> {
         .with_app_id("ferrum-ssh")
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([760.0, 480.0]);
+    if std::env::var("FERRUM_QA")
+        .is_ok_and(|steps| !steps.split(',').any(|step| step.trim() == "interactive"))
+    {
+        viewport = viewport.with_window_level(egui::WindowLevel::AlwaysOnTop);
+    }
     if let Some(icon) = icon {
         viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }

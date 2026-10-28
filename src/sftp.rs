@@ -438,7 +438,7 @@ pub fn start_transfer(
     dst_dir: String,
     ctx: egui::Context,
     on_done: impl FnOnce(Result<(), String>) + Send + 'static,
-) {
+) -> u64 {
     let dst_path = dst.join(&dst_dir, &entry.name);
     let t = Arc::new(Transfer {
         id: TRANSFER_ID.fetch_add(1, Ordering::Relaxed),
@@ -452,6 +452,7 @@ pub fn start_transfer(
         error: Mutex::new(None),
         started: std::time::Instant::now(),
     });
+    let id = t.id;
     transfers.lock().push(t.clone());
     rt.spawn(async move {
         *t.status.lock() = TransferStatus::Running;
@@ -478,6 +479,7 @@ pub fn start_transfer(
         on_done(res.map_err(|e| format!("{e:#}")));
         ctx.request_repaint();
     });
+    id
 }
 
 /// Download a remote file to a temp dir for editing.
@@ -519,6 +521,75 @@ mod tests {
     fn remote_path_helpers() {
         let b = Backend::Local;
         assert!(b.join("/tmp", "x").ends_with("x"));
+    }
+
+    #[tokio::test]
+    async fn retrying_a_failed_transfer_uses_a_new_job_and_copies_the_original_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("release.txt");
+        let destination = directory.path().join("destination");
+        tokio::fs::create_dir(&destination).await.unwrap();
+        let entry = FileEntry {
+            name: "release.txt".into(),
+            path: source.to_string_lossy().into(),
+            is_dir: false,
+            is_link: false,
+            size: 5,
+            mtime: None,
+            perms: None,
+            owner: String::new(),
+        };
+        let transfers: Transfers = Default::default();
+        let (ctx, handle) = (egui::Context::default(), tokio::runtime::Handle::current());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let failed_id = start_transfer(
+            &handle,
+            &transfers,
+            Backend::Local,
+            entry.clone(),
+            Backend::Local,
+            destination.to_string_lossy().into(),
+            ctx.clone(),
+            move |outcome| {
+                tx.send(outcome).unwrap();
+            },
+        );
+        let failed = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(failed.is_err());
+        assert_eq!(*transfers.lock()[0].status.lock(), TransferStatus::Failed);
+        tokio::fs::write(&source, b"ready").await.unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let retry_id = start_transfer(
+            &handle,
+            &transfers,
+            Backend::Local,
+            entry,
+            Backend::Local,
+            destination.to_string_lossy().into(),
+            ctx,
+            move |outcome| {
+                tx.send(outcome).unwrap();
+            },
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_ne!(failed_id, retry_id);
+        assert_eq!(
+            tokio::fs::read(destination.join("release.txt"))
+                .await
+                .unwrap(),
+            b"ready"
+        );
+        let jobs = transfers.lock();
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(*jobs[1].status.lock(), TransferStatus::Done);
+        assert_eq!(jobs[1].done.load(Ordering::Relaxed), 5);
     }
 
     #[tokio::test]
