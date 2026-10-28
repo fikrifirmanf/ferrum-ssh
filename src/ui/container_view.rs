@@ -18,6 +18,8 @@ pub enum Command {
     Logs(Item),
     /// Text to type into the terminal (not run).
     Shell(String),
+    /// Retry Docker and Podman through `sudo -n`.
+    UseSudo,
 }
 
 pub fn show(
@@ -65,8 +67,28 @@ pub fn show(
         }
         return None;
     };
+    let mut command = None;
     for (runtime, message) in &listing.errors {
         ui.colored_label(pal.warning, format!("{}: {message}", runtime.label()));
+        if crate::containers::is_permission_error(message) {
+            if browser.use_sudo {
+                dim(
+                    ui,
+                    pal,
+                    "sudo did not work either. It must be allowed without a password (sudo -n).",
+                );
+            } else {
+                dim(
+                    ui,
+                    pal,
+                    "Your user can't use the Docker socket. Add it to the docker group \
+                     (sudo usermod -aG docker $USER, then reconnect), or use sudo.",
+                );
+                if ui.button("Retry with sudo").clicked() {
+                    command = Some(Command::UseSudo);
+                }
+            }
+        }
     }
     if listing.items.is_empty() {
         if listing.errors.is_empty() {
@@ -76,7 +98,7 @@ pub fn show(
                 "No containers or pods found. Docker, Podman or kubectl must be installed on the server.",
             );
         }
-        return None;
+        return command;
     }
     ui.add(
         egui::TextEdit::singleline(&mut browser.filter)
@@ -91,7 +113,6 @@ pub fn show(
             dim(ui, pal, label);
         });
     }
-    let mut command = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
