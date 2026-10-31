@@ -1,7 +1,10 @@
-name: Manual packaging
+name: Release
 
-# CircleCI publishes releases. This workflow is a manual packaging fallback.
+# GitHub Actions is the primary release pipeline. If any job fails on a tag push,
+# the last job triggers the CircleCI pipeline for the same tag as a fallback.
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -78,3 +81,44 @@ jobs:
           path: |
             dist/*.zip
             dist/*-setup.exe
+
+  publish:
+    needs: [macos, linux, windows]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+      - name: Test release publishing logic
+        run: python3 -m unittest discover -s packaging -p 'test_publish_release.py' -v
+      - name: Publish tagged GitHub release
+        run: python3 packaging/publish_release.py release-artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CIRCLE_TAG: ${{ github.ref_name }}
+          CIRCLE_SHA1: ${{ github.sha }}
+
+  circleci-fallback:
+    needs: [macos, linux, windows, publish]
+    if: ${{ failure() && github.ref_type == 'tag' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger CircleCI fallback pipeline
+        env:
+          CIRCLECI_TOKEN: ${{ secrets.CIRCLECI_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "$CIRCLECI_TOKEN" ]; then
+            echo "::error::Set the CIRCLECI_TOKEN repository secret to enable the CircleCI fallback."
+            exit 1
+          fi
+          curl --fail-with-body -sS -X POST \
+            "https://circleci.com/api/v2/project/gh/${{ github.repository }}/pipeline" \
+            -H "Circle-Token: $CIRCLECI_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag\": \"$TAG\", \"parameters\": {\"run_fallback\": true}}"

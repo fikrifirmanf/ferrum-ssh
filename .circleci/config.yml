@@ -1,5 +1,12 @@
 version: 2.1
 
+# Fallback pipeline: GitHub Actions is the primary release pipeline and starts
+# this one through the API (run_fallback=true) only when one of its jobs fails.
+parameters:
+  run_fallback:
+    type: boolean
+    default: false
+
 commands:
   install-rust:
     steps:
@@ -162,9 +169,11 @@ jobs:
 workflows:
   compile-all-platforms:
     when:
-      matches:
-        pattern: "^v.*"
-        value: << pipeline.git.tag >>
+      and:
+        - << pipeline.parameters.run_fallback >>
+        - matches:
+            pattern: "^v.*"
+            value: << pipeline.git.tag >>
     jobs:
       - linux:
           filters:

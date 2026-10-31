@@ -136,11 +136,11 @@ Ferrum checks public GitHub releases once after startup. When a newer release is
 
 The updater selects a package for the current OS and CPU, checks its size and GitHub SHA-256 digest, then stages it before offering **Install and restart**. macOS additionally checks the app signature, bundle identifier and version. Restart saves the vault and closes terminal sessions. The old build is kept beside the installation as a hidden recovery copy. Installation errors leave a log in the `ferrum-update-*` temporary directory. AppImage and read-only installations can use the GitHub release page to install manually.
 
-To publish an update, bump `package.version` in `Cargo.toml`, refresh `Cargo.lock`, and push the matching `v<version>` tag. CircleCI builds every platform, creates checksums, and publishes a GitHub Release after all builds succeed. The tag must match the package version.
+To publish an update, bump `package.version` in `Cargo.toml`, refresh `Cargo.lock`, and push the matching `v<version>` tag. GitHub Actions builds every platform, creates checksums, and publishes a GitHub Release after all builds succeed. If any job fails, CircleCI is triggered for the same tag as a fallback. The tag must match the package version.
 
 ## CircleCI
 
-`.circleci/config.yml` runs only when you push a tag starting with `v`, such as `v0.1.1`. Branch pushes and pull requests do not run this workflow. Each tag runs format checks and unit tests, builds Linux, Windows and both macOS packages, then publishes a GitHub Release after all builds succeed.
+`.circleci/config.yml` is the release fallback. It no longer runs on a plain tag push. The `circleci-fallback` job in `.github/workflows/release.yml` starts it through the CircleCI API when a GitHub Actions release job fails on a `v*` tag. Add a CircleCI personal API token as the `CIRCLECI_TOKEN` repository secret in GitHub to enable this. Each tag runs format checks and unit tests, builds Linux, Windows and both macOS packages, then publishes a GitHub Release after all builds succeed.
 
 Connect `fikrifirmanf/ferrum-ssh` in CircleCI and select the existing `.circleci/config.yml`. The macOS and Windows jobs need access to those CircleCI executors.
 
