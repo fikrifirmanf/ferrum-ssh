@@ -96,7 +96,7 @@ For CircleCI, add these environment variables under **Project Settings → Envir
 | `APPLE_TEAM_ID` | Apple developer team ID. |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password created for notarization. |
 
-The CI wrapper imports the certificate into a temporary keychain and deletes it on exit. Without these variables, tagged CircleCI releases fall back to ad-hoc signed DMGs. Set `MACOS_REQUIRE_NOTARIZATION=1` in CircleCI to make missing credentials fail the release instead. Manual GitHub Actions packages always require notarization. Local builds can still produce ad-hoc packages for development. Never commit the P12 file or credentials. Replace existing downloads with the signed release.
+The CI wrapper imports the certificate into a temporary keychain and deletes it on exit. Without these variables, tagged CircleCI releases fall back to ad-hoc signed DMGs. Set `MACOS_REQUIRE_NOTARIZATION=1` in CircleCI to make missing credentials fail the release instead. GitHub Actions releases follow the same rule: they are ad-hoc signed until the certificate secret is set, then notarization is required. Local builds can still produce ad-hoc packages for development. Never commit the P12 file or credentials. Replace existing downloads with the signed release.
 
 ## Tests
 

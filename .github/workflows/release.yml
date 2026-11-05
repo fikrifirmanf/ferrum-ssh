@@ -26,10 +26,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test macOS packaging
         run: python3 -m unittest discover -s packaging -p 'test_build_macos.py' -v
-      - name: Sign, notarize and package macOS
+      # Ad-hoc signed unless MACOS_CERTIFICATE_P12_BASE64 is set. Once it is,
+      # build-macos-ci.sh requires signing and notarization to succeed.
+      - name: Package macOS
         run: sh packaging/build-macos-ci.sh ${{ matrix.target }}
         env:
-          MACOS_REQUIRE_NOTARIZATION: "1"
           MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
