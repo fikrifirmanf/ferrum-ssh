@@ -21,11 +21,11 @@ Captured from the running Workbench UI with demo hosts. No saved connections or 
 
 </details>
 
-## Workbench interface
+## Forge interface
 
-Select a host to inspect its address, login and route before connecting. Use Up/Down to select a row and Enter to connect. Search, group and tag filters work together. Quick connect is available from the command palette and the host actions menu.
+Select a host to inspect its address, login and route before connecting. Use Up/Down to select a row and Enter to connect. Groups fold in place, and search works across them. To show one group or filter by tag, use the `…` menu in the host toolbar. Quick connect is available from the command palette and the same menu.
 
-Choose comfortable or compact rows in **View** or **Settings → Appearance**. Existing grid preferences remain available. Session tools share one panel, and small windows can switch between the two file locations.
+Choose comfortable or compact rows in the host toolbar or **Settings → Appearance**. Existing grid preferences remain available. Sections and panels animate as they open; turn this off with **Reduce motion** in Settings, which also follows the system preference on macOS and GNOME. Session tools share one panel, and small windows can switch between the two file locations.
 
 ## Features
 
@@ -124,7 +124,7 @@ This mode adds demo data and never saves the vault. The steps `ssh`, `accept`, `
 
 Ferrum is created by [Fikri Firman Fadilah](https://github.com/fikrifirmanf) and released under the [MIT license](LICENSE). It uses [egui](https://github.com/emilk/egui) for the interface, [russh](https://github.com/warp-tech/russh) for SSH, and [alacritty_terminal](https://github.com/alacritty/alacritty) for terminal emulation.
 
-Icons are [Phosphor](https://phosphoricons.com) (MIT, `assets/fonts/PHOSPHOR-LICENSE.txt`). The UI palette is checked in tests for WCAG AA contrast in all three themes.
+Icons are [Phosphor](https://phosphoricons.com) (MIT, `assets/fonts/PHOSPHOR-LICENSE.txt`). Interface and terminal type is [Geist](https://vercel.com/font) (SIL OFL, `assets/fonts/GEIST-LICENSE.txt`). The UI palette is checked in tests for WCAG AA contrast in all three themes.
 
 ## Menus and updates
 

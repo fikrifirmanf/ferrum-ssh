@@ -1,6 +1,6 @@
 [package]
 name = "ferrum-ssh"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Ferrum — a fast, cross-platform SSH / SFTP / Telnet / Serial / Mosh client written in Rust"
 license = "MIT"
@@ -13,6 +13,7 @@ path = "src/main.rs"
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "persistence", "wayland", "x11"] }
 egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 egui_extras = "0.37"
+emath = "0.37"
 semver = "1"
 tempfile = "3"
 flate2 = "1"

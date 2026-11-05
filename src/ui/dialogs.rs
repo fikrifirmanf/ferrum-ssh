@@ -3,28 +3,28 @@
 
 use egui::{Key, RichText};
 
-use super::{danger_button, ghost_button, primary_button};
+use super::{danger_button, forms, ghost_button, primary_button};
 use crate::app::{App, Dialog, Tab};
 use crate::conn::{PromptKind, PromptReply};
-use crate::model::{FlowControl, Host, Parity, Protocol};
+use crate::model::{Host, Protocol};
 use crate::themes::Palette;
 
 fn modal_frame(pal: Palette) -> egui::Frame {
     egui::Frame::new()
-        .fill(pal.panel)
-        .stroke(egui::Stroke::new(1.0, pal.border))
-        .corner_radius(12)
+        .fill(pal.card)
+        .stroke(egui::Stroke::new(1.0, pal.control_border))
+        .corner_radius(crate::themes::tokens::RADIUS_LARGE)
         .inner_margin(egui::Margin::same(20))
 }
 
 fn title(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).size(18.0).strong());
-    ui.add_space(6.0);
+    forms::heading(ui, text, 18.0);
+    ui.add_space(4.0);
 }
 
 fn field_label(ui: &mut egui::Ui, text: &str, pal: Palette) {
     ui.add_space(4.0);
-    ui.label(RichText::new(text).small().color(pal.text_dim));
+    forms::label(ui, text, pal);
 }
 
 fn enter_pressed(ui: &egui::Ui) -> bool {
@@ -50,7 +50,12 @@ impl App {
         let mut reply: Option<PromptReply> = None;
         #[allow(deprecated)]
         let id = egui::Id::unique(("prompt", req.session));
-        egui::Modal::new(id).frame(modal_frame(pal)).show(ctx, |ui| {
+        // Host-key warnings and credential prompts block at once, with no entrance to wait through.
+        egui::Modal::new(id)
+            .area(egui::Modal::default_area(id).fade_in(false))
+            .backdrop_color(pal.scrim)
+            .frame(modal_frame(pal))
+            .show(ctx, |ui| {
             ui.set_width(440.0);
             match &req.kind {
                 PromptKind::HostKeyUnknown { host, port, key_type, fingerprint } => {
@@ -60,7 +65,7 @@ impl App {
                     field_label(ui, key_type, pal);
                     ui.label(RichText::new(fingerprint).monospace());
                     ui.add_space(8.0);
-                    ui.checkbox(&mut state.save_host_key, "Remember this host in Known Hosts");
+                    forms::check(ui, &mut state.save_host_key, "Remember this host in Known Hosts");
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if ui.add(primary_button("Continue", pal)).clicked() || enter_pressed(ui) {
@@ -72,7 +77,7 @@ impl App {
                     });
                 }
                 PromptKind::HostKeyChanged { host, port, key_type, fingerprint, old_fingerprint } => {
-                    title(ui, "\u{E4E0} Host key changed");
+                    title(ui, "\u{E4E0}  Host key changed");
                     ui.colored_label(
                         pal.danger,
                         format!("The key for {host}:{port} is different from the one you saved. Someone could be intercepting the connection, or the server was reinstalled."),
@@ -102,7 +107,10 @@ impl App {
                     let mut submit = false;
                     for (i, f) in fields.iter().enumerate() {
                         field_label(ui, &f.label, pal);
-                        let r = if f.secret { super::password_input(ui, &mut state.values[i], "", f32::INFINITY) } else { ui.add(egui::TextEdit::singleline(&mut state.values[i]).desired_width(f32::INFINITY)) };
+                        let r = {
+                            let input = forms::Input::bare(&f.label).salt(&f.label);
+                            if f.secret { input.password().show(ui, &mut state.values[i]) } else { input.show(ui, &mut state.values[i]) }
+                        };
                         if i == 0 && !r.has_focus() && ui.memory(|m| m.focused().is_none()) {
                             r.request_focus();
                         }
@@ -141,6 +149,7 @@ impl App {
         let pal = self.pal();
         let mut outcome = Outcome::Keep;
         let resp = egui::Modal::new(egui::Id::unique("app-dialog"))
+            .backdrop_color(pal.scrim)
             .frame(modal_frame(pal))
             .show(ctx, |ui| {
                 ui.set_width(460.0);
@@ -160,17 +169,16 @@ impl App {
             Dialog::QuickConnect { input, error } => {
                 title(ui, "Quick connect");
                 ui.label("Open a session with an address. Saved hosts stay in the library.");
-                field_label(ui, "Connection address", pal);
-                let response = ui.add(
-                    egui::TextEdit::singleline(input)
-                        .hint_text("user@host:port")
-                        .desired_width(f32::INFINITY),
-                );
+                ui.add_space(4.0);
+                let response = forms::Input::new("Connection address")
+                    .hint("user@host:port")
+                    .mono()
+                    .show(ui, input);
                 if response.changed() {
                     *error = None;
                 }
                 if let Some(message) = error {
-                    ui.colored_label(pal.danger, message.as_str());
+                    forms::error_line(ui, message, pal);
                 }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -184,7 +192,7 @@ impl App {
                             *error = Some("Enter a hostname or user@host:port.".into());
                         }
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.add(ghost_button("Cancel")).clicked() {
                         close = true;
                     }
                 });
@@ -197,19 +205,16 @@ impl App {
                 busy,
             } => {
                 title(ui, "Generate SSH key");
-                field_label(ui, "Label", pal);
-                ui.add(egui::TextEdit::singleline(label).desired_width(f32::INFINITY));
-                field_label(ui, "Type", pal);
-                egui::ComboBox::from_id_salt("keygen-kind")
-                    .width(260.0)
-                    .selected_text(kind.label())
-                    .show_ui(ui, |ui| {
-                        for k in crate::keys::KeyKind::ALL {
-                            ui.selectable_value(kind, k, k.label());
-                        }
-                    });
-                field_label(ui, "Passphrase (optional)", pal);
-                super::password_input(ui, passphrase, "", f32::INFINITY);
+                forms::Input::new("Label").show(ui, label);
+                let kinds: Vec<_> = crate::keys::KeyKind::ALL
+                    .into_iter()
+                    .map(|k| (k, k.label().to_string()))
+                    .collect();
+                forms::select_field(ui, "Type", kind, &kinds);
+                forms::Input::new("Passphrase")
+                    .hint("Optional")
+                    .password()
+                    .show(ui, passphrase);
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     if ui
@@ -245,11 +250,10 @@ impl App {
                 error,
             } => {
                 title(ui, "Import private key");
-                field_label(ui, "Label", pal);
-                ui.add(egui::TextEdit::singleline(label).desired_width(f32::INFINITY));
+                forms::Input::new("Label").show(ui, label);
                 ui.horizontal(|ui| {
-                    field_label(ui, "Private key (OpenSSH or PEM)", pal);
-                    if ui.small_button("Choose file…").clicked() {
+                    forms::label(ui, "Private key, OpenSSH or PEM", pal);
+                    if ui.add(forms::Btn::ghost("Choose file…").small()).clicked() {
                         if let Some(p) = rfd::FileDialog::new().pick_file() {
                             match std::fs::read_to_string(&p) {
                                 Ok(t) => {
@@ -269,17 +273,21 @@ impl App {
                 egui::ScrollArea::vertical()
                     .max_height(160.0)
                     .show(ui, |ui| {
-                        ui.add(
-                            egui::TextEdit::multiline(private)
-                                .code_editor()
-                                .desired_rows(6)
-                                .desired_width(f32::INFINITY),
+                        forms::text_area(
+                            ui,
+                            "",
+                            private,
+                            6,
+                            true,
+                            "-----BEGIN OPENSSH PRIVATE KEY-----",
                         );
                     });
-                field_label(ui, "Passphrase (if the key is encrypted)", pal);
-                super::password_input(ui, passphrase, "", f32::INFINITY);
+                forms::Input::new("Passphrase")
+                    .hint("If the key is encrypted")
+                    .password()
+                    .show(ui, passphrase);
                 if let Some(e) = error {
-                    ui.colored_label(pal.danger, e.as_str());
+                    forms::error_line(ui, e, pal);
                 }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -374,113 +382,17 @@ impl App {
                     }
                 }
                 if let Some(e) = error {
-                    ui.colored_label(pal.danger, e.as_str());
+                    forms::error_line(ui, e, pal);
                 }
                 ui.add_space(12.0);
                 if ui.add(ghost_button("Close")).clicked() {
                     close = true;
                 }
             }
-            Dialog::Serial { cfg, ports } => {
+            Dialog::Serial { cfg } => {
                 title(ui, "Serial connection");
-                field_label(ui, "Port", pal);
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("serial-port")
-                        .width(300.0)
-                        .selected_text(if cfg.device.is_empty() {
-                            "Choose a port"
-                        } else {
-                            cfg.device.as_str()
-                        })
-                        .show_ui(ui, |ui| {
-                            for p in ports.iter() {
-                                ui.selectable_value(&mut cfg.device, p.clone(), p);
-                            }
-                        });
-                    if ui
-                        .small_button("\u{E036}")
-                        .on_hover_text("Rescan ports")
-                        .clicked()
-                    {
-                        *ports = crate::conn::serial::list_ports();
-                    }
-                });
-                ui.add(
-                    egui::TextEdit::singleline(&mut cfg.device)
-                        .hint_text("or type a path, e.g. /dev/ttyUSB0 or COM3")
-                        .desired_width(f32::INFINITY),
-                );
-                egui::Grid::new("serial-grid")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label("Baud rate");
-                        egui::ComboBox::from_id_salt("baud")
-                            .selected_text(cfg.baud_rate.to_string())
-                            .show_ui(ui, |ui| {
-                                for b in [
-                                    300, 1200, 2400, 4800, 9600, 19_200, 38_400, 57_600, 115_200,
-                                    230_400, 460_800, 921_600,
-                                ] {
-                                    ui.selectable_value(&mut cfg.baud_rate, b, b.to_string());
-                                }
-                            });
-                        ui.end_row();
-                        ui.label("Data bits");
-                        egui::ComboBox::from_id_salt("databits")
-                            .selected_text(cfg.data_bits.to_string())
-                            .show_ui(ui, |ui| {
-                                for b in [5u8, 6, 7, 8] {
-                                    ui.selectable_value(&mut cfg.data_bits, b, b.to_string());
-                                }
-                            });
-                        ui.end_row();
-                        ui.label("Stop bits");
-                        egui::ComboBox::from_id_salt("stopbits")
-                            .selected_text(cfg.stop_bits.to_string())
-                            .show_ui(ui, |ui| {
-                                for b in [1u8, 2] {
-                                    ui.selectable_value(&mut cfg.stop_bits, b, b.to_string());
-                                }
-                            });
-                        ui.end_row();
-                        ui.label("Parity");
-                        egui::ComboBox::from_id_salt("parity")
-                            .selected_text(format!("{:?}", cfg.parity))
-                            .show_ui(ui, |ui| {
-                                for p in [Parity::None, Parity::Odd, Parity::Even] {
-                                    ui.selectable_value(&mut cfg.parity, p, format!("{p:?}"));
-                                }
-                            });
-                        ui.end_row();
-                        ui.label("Flow control");
-                        egui::ComboBox::from_id_salt("flow")
-                            .selected_text(format!("{:?}", cfg.flow_control))
-                            .show_ui(ui, |ui| {
-                                for f in [
-                                    FlowControl::None,
-                                    FlowControl::Software,
-                                    FlowControl::Hardware,
-                                ] {
-                                    ui.selectable_value(&mut cfg.flow_control, f, format!("{f:?}"));
-                                }
-                            });
-                        ui.end_row();
-                        ui.label("Line ending");
-                        egui::ComboBox::from_id_salt("eol")
-                            .selected_text(eol_label(&cfg.line_ending))
-                            .show_ui(ui, |ui| {
-                                for e in ["\r", "\n", "\r\n"] {
-                                    ui.selectable_value(
-                                        &mut cfg.line_ending,
-                                        e.to_string(),
-                                        eol_label(e),
-                                    );
-                                }
-                            });
-                        ui.end_row();
-                    });
-                ui.checkbox(&mut cfg.local_echo, "Local echo");
+                ui.spacing_mut().item_spacing.y = 12.0;
+                super::editors::serial_form(ui, cfg, pal);
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     let ready = !cfg.device.trim().is_empty();
@@ -537,24 +449,16 @@ impl App {
                     ))
                     .color(pal.text_dim),
                 );
-                field_label(ui, "Host", pal);
-                let current = host_id
-                    .and_then(|h| self.vault.host(h))
-                    .map(|h| h.display_name())
-                    .unwrap_or_else(|| "Choose a host".into());
-                egui::ComboBox::from_id_salt("install-host")
-                    .width(320.0)
-                    .selected_text(current)
-                    .show_ui(ui, |ui| {
-                        for h in self
-                            .vault
-                            .hosts
-                            .iter()
-                            .filter(|h| h.protocol == Protocol::Ssh)
-                        {
-                            ui.selectable_value(host_id, Some(h.id), h.display_name());
-                        }
-                    });
+                let mut hosts: Vec<(Option<uuid::Uuid>, String)> =
+                    vec![(None, "Choose a host".to_string())];
+                hosts.extend(
+                    self.vault
+                        .hosts
+                        .iter()
+                        .filter(|h| h.protocol == Protocol::Ssh)
+                        .map(|h| (Some(h.id), h.display_name())),
+                );
+                forms::select_field(ui, "Host", host_id, &hosts);
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     if ui
@@ -587,15 +491,19 @@ impl App {
                 );
                 ui.label(RichText::new("The vault is encrypted on disk with this password (Argon2id + ChaCha20-Poly1305). It can't be recovered if you forget it.").color(pal.text_dim));
                 if has {
-                    field_label(ui, "Current password", pal);
-                    super::password_input(ui, current, "", f32::INFINITY);
+                    forms::Input::new("Current password")
+                        .password()
+                        .show(ui, current);
                 }
-                field_label(ui, "New password (leave empty to remove)", pal);
-                super::password_input(ui, new1, "", f32::INFINITY);
-                field_label(ui, "Repeat new password", pal);
-                super::password_input(ui, new2, "", f32::INFINITY);
+                forms::Input::new("New password")
+                    .hint("Leave empty to remove")
+                    .password()
+                    .show(ui, new1);
+                forms::Input::new("Repeat new password")
+                    .password()
+                    .show(ui, new2);
                 if let Some(e) = error {
-                    ui.colored_label(pal.danger, e.as_str());
+                    forms::error_line(ui, e, pal);
                 }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -650,10 +558,11 @@ impl App {
             Dialog::ExportVault { passphrase, error } => {
                 title(ui, "Export encrypted vault");
                 ui.label(RichText::new("Creates a backup file with every host, key, snippet and setting, encrypted with this passphrase.").color(pal.text_dim));
-                field_label(ui, "Passphrase", pal);
-                super::password_input(ui, passphrase, "", f32::INFINITY);
+                forms::Input::new("Passphrase")
+                    .password()
+                    .show(ui, passphrase);
                 if let Some(e) = error {
-                    ui.colored_label(pal.danger, e.as_str());
+                    forms::error_line(ui, e, pal);
                 }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -685,10 +594,11 @@ impl App {
                     RichText::new("Merges a Ferrum backup into this vault. Newer items win.")
                         .color(pal.text_dim),
                 );
-                field_label(ui, "Passphrase", pal);
-                super::password_input(ui, passphrase, "", f32::INFINITY);
+                forms::Input::new("Passphrase")
+                    .password()
+                    .show(ui, passphrase);
                 if let Some(e) = error {
-                    ui.colored_label(pal.danger, e.as_str());
+                    forms::error_line(ui, e, pal);
                 }
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -737,8 +647,7 @@ impl App {
             } => {
                 title(ui, &format!("Run “{}”", snippet.name));
                 for (name, value) in values.iter_mut() {
-                    field_label(ui, name, pal);
-                    ui.add(egui::TextEdit::singleline(value).desired_width(f32::INFINITY));
+                    forms::Input::new(name).show(ui, value);
                 }
                 field_label(ui, "Run in", pal);
                 egui::ScrollArea::vertical()
@@ -748,7 +657,7 @@ impl App {
                             let name = self
                                 .session_title(*sid)
                                 .unwrap_or_else(|| format!("Session {sid}"));
-                            ui.checkbox(on, name);
+                            forms::check(ui, on, name);
                         }
                     });
                 let mut preview = snippet.script.clone();
@@ -778,8 +687,7 @@ impl App {
                     RichText::new("Remembers every open tab, its split layout and hosts so you can reopen them together.")
                         .color(pal.text_dim),
                 );
-                field_label(ui, "Name", pal);
-                let r = ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+                let r = forms::Input::new("Name").show(ui, name);
                 r.request_focus();
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -795,7 +703,7 @@ impl App {
             }
             Dialog::RenameTab { tab, title: t } => {
                 title(ui, "Rename tab");
-                let r = ui.add(egui::TextEdit::singleline(t).desired_width(f32::INFINITY));
+                let r = forms::Input::bare("Tab name").show(ui, t);
                 r.request_focus();
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
@@ -826,9 +734,13 @@ impl App {
             }
             Dialog::About => {
                 ui.horizontal(|ui| {
-                    super::logo_mark(ui, 52.0, pal.accent);
+                    super::logo_mark(ui, 52.0);
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("Ferrum").size(28.0).strong());
+                        ui.label(
+                            RichText::new("Ferrum")
+                                .size(28.0)
+                                .family(crate::fonts::semibold()),
+                        );
                         ui.label(
                             RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
                                 .color(pal.text_dim),
@@ -836,7 +748,11 @@ impl App {
                     });
                 });
                 ui.add_space(16.0);
-                ui.label(RichText::new("Open-source SSH client").size(18.0).strong());
+                ui.label(
+                    RichText::new("Open-source SSH client")
+                        .size(18.0)
+                        .family(crate::fonts::semibold()),
+                );
                 ui.label("Connect to servers, transfer files, and work in your terminal across macOS, Windows, and Linux.");
                 ui.add_space(12.0);
                 ui.label(
@@ -910,14 +826,6 @@ impl App {
                 Err(e) => bridge.toast(format!("Installing key failed: {e:#}"), true),
             }
         });
-    }
-}
-
-fn eol_label(e: &str) -> &'static str {
-    match e {
-        "\n" => "LF",
-        "\r\n" => "CR LF",
-        _ => "CR",
     }
 }
 

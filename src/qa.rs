@@ -51,6 +51,19 @@ impl App {
             self.vault.settings.local_shell = "/bin/sh".into();
         }
         self.locked = false;
+        // Screenshots must never show the real vault's records.
+        self.vault.known_hosts.clear();
+        self.vault.identities.clear();
+        self.vault.connection_logs.clear();
+        self.vault.history = ["docker compose ps", "uptime", "systemctl status nginx"]
+            .into_iter()
+            .map(|command| crate::model::HistoryEntry {
+                id: uuid::Uuid::new_v4(),
+                command: command.into(),
+                host_label: "api-gateway".into(),
+                timestamp: 0,
+            })
+            .collect();
         let prod = Group {
             name: "Production".into(),
             ..Default::default()
@@ -226,8 +239,10 @@ impl App {
             match step {
                 "hostkeys" => assert_eq!(
                     self.inspected_host,
-                    self.filtered_hosts().get(1).map(|host| host.id),
-                    "Native ArrowDown must select the next host"
+                    crate::ui::hosts::library_order(&self.vault, &self.filtered_hosts())
+                        .get(1)
+                        .copied(),
+                    "Native ArrowDown must select the next host on screen"
                 ),
                 "filtered" => assert_eq!(
                     self.filtered_hosts()
@@ -360,6 +375,17 @@ impl App {
                     self.editor = Some(crate::app::Editor::Host(Box::new(h), false));
                 }
             }
+            // Focuses the address line so a capture shows the focus treatment.
+            "editfocus" => {
+                self.active_tab = None;
+                self.page = Page::Hosts;
+                if let Some(h) = self.vault.hosts.first().cloned() {
+                    self.editor = Some(crate::app::Editor::Host(Box::new(h), false));
+                }
+                self.bridge
+                    .ctx
+                    .memory_mut(|memory| memory.request_focus(crate::ui::forms::address_host_id()));
+            }
             "workspaces" => {
                 self.active_tab = None;
                 self.page = Page::Workspaces;
@@ -454,10 +480,11 @@ impl App {
                 self.search.clear();
                 self.current_group = None;
                 self.tag_filter = None;
-                if let Some(host) = self.filtered_hosts().first() {
-                    self.inspected_host = Some(host.id);
+                let order = crate::ui::hosts::library_order(&self.vault, &self.filtered_hosts());
+                if let Some(id) = order.first().copied() {
+                    self.inspected_host = Some(id);
                     self.bridge.ctx.memory_mut(|memory| {
-                        memory.request_focus(egui::Id::unique(("host-row", host.id)))
+                        memory.request_focus(egui::Id::unique(("host-row", id)))
                     });
                 }
                 if let Some(qa) = self.qa.as_mut() {
@@ -498,7 +525,6 @@ impl App {
             "serial" => {
                 self.dialog = Some(crate::app::Dialog::Serial {
                     cfg: Default::default(),
-                    ports: crate::conn::serial::list_ports(),
                 });
             }
             "keygen" => {

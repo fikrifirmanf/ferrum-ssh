@@ -3,7 +3,7 @@
 use egui::{CornerRadius, Pos2, Rect, RichText, Stroke, Vec2};
 
 use super::term_view::{self, ContextAction, ViewConfig};
-use super::{ghost_button, status_color};
+use super::{forms, motion, status_color};
 use crate::app::{App, Dialog, SidePanel, SplitLayout, Tab};
 use crate::conn::{AppEvent, Status};
 use crate::model::Snippet;
@@ -47,6 +47,14 @@ enum TermAction {
         previous: Option<crate::health::CpuTimes>,
     },
 }
+
+const SESSION_TOOLS: [(SidePanel, &str); 5] = [
+    (SidePanel::Health, "Server health"),
+    (SidePanel::Containers, "Containers"),
+    (SidePanel::Snippets, "Snippets"),
+    (SidePanel::History, "Command history"),
+    (SidePanel::Ai, "AI command help"),
+];
 
 /// Seconds between container list refreshes while the panel is open.
 const CONTAINER_INTERVAL: f64 = 5.0;
@@ -122,49 +130,58 @@ impl App {
 
         // Session actions stay in a compact toolbar; shell input keeps its own keybindings.
         egui::Panel::top(egui::Id::unique(("term-toolbar", tab_id)))
-            .exact_size(48.0)
+            .exact_size(crate::themes::tokens::BAR)
             .frame(
                 egui::Frame::new()
                     .fill(pal.bg)
-                    .inner_margin(egui::Margin::symmetric(16, 6))
-                    .stroke(Stroke::new(1.0, pal.border)),
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     if let Some(pane) = tab.panes.get(tab.active) {
                         let status = pane.session.status.lock().clone();
-                        ui.label(RichText::new("●").color(status_color(&status, pal)));
-                        let target = &pane.session.target;
-                        ui.add(egui::Label::new(RichText::new(&target.label).strong()).truncate())
-                            .on_hover_text(format!(
-                                "{} · {}@{}:{}",
-                                target.protocol.label(),
-                                target.username,
-                                target.address,
-                                target.port
-                            ));
-                        if ui.ctx().content_rect().width() > 1100.0 {
-                            ui.label(
-                                RichText::new(target.protocol.label())
-                                    .small()
-                                    .color(pal.text_dim),
-                            );
+                        let color = status_color(&status, pal);
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        forms::dot(ui, color);
+                        // State changes show at once, with a word as well as a color.
+                        let word = match &status {
+                            Status::Connected => "Connected".to_string(),
+                            Status::Connecting(message) => message.clone(),
+                            Status::Closed(_) => "Closed".to_string(),
+                            Status::Failed(_) => "Failed".to_string(),
+                        };
+                        ui.add(
+                            egui::Label::new(RichText::new(word).size(13.0).color(color))
+                                .truncate(),
+                        );
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if matches!(status, Status::Connecting(_)) {
+                            ui.spinner();
                         }
-                        match &status {
-                            Status::Connecting(message) => {
-                                ui.spinner();
-                                ui.label(RichText::new(message).small().color(pal.warning));
-                            }
-                            Status::Failed(_) | Status::Closed(_) => {
-                                if ui.button("Reconnect").clicked() {
-                                    actions.push(TermAction::Reconnect(pane.session.id));
-                                }
-                            }
-                            _ => {}
+                        let target = &pane.session.target;
+                        let address = if target.username.is_empty() {
+                            target.address.clone()
+                        } else {
+                            format!("{}@{}", target.username, target.address)
+                        };
+                        if ui.ctx().content_rect().width() > 960.0 {
+                            ui.label(RichText::new(address).monospace().color(pal.text_dim))
+                                .on_hover_text(format!(
+                                    "{} · {}:{}",
+                                    target.protocol.label(),
+                                    target.address,
+                                    target.port
+                                ));
+                        }
+                        if matches!(status, Status::Failed(_) | Status::Closed(_))
+                            && ui.add(forms::Btn::secondary("Reconnect").small()).clicked()
+                        {
+                            actions.push(TermAction::Reconnect(pane.session.id));
                         }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.menu_button("\u{E1FE}", |ui| {
+                        ui.spacing_mut().interact_size.y = 32.0;
+                        ui.menu_button(crate::icons::DOTS_THREE, |ui| {
                             if ui.button("Increase terminal font").clicked() {
                                 actions.push(TermAction::FontDelta(1.0));
                                 ui.close();
@@ -173,35 +190,28 @@ impl App {
                                 actions.push(TermAction::FontDelta(-1.0));
                                 ui.close();
                             }
-                            if tab.panes.len() > 1 {
-                                ui.separator();
-                                ui.checkbox(&mut tab.broadcast, "Broadcast input to all panes");
-                            }
                         })
                         .response
                         .on_hover_text("Terminal preferences");
-                        ui.menu_button("\u{E870}  Split", |ui| {
-                            if ui.button("Split right").clicked() {
-                                actions.push(TermAction::Split(SplitLayout::Horizontal));
-                                ui.close();
-                            }
-                            if ui.button("Split down").clicked() {
-                                actions.push(TermAction::Split(SplitLayout::Vertical));
-                                ui.close();
-                            }
-                            if ui.button("Add grid pane").clicked() {
-                                actions.push(TermAction::Split(SplitLayout::Grid));
-                                ui.close();
-                            }
-                        });
-                        ui.menu_button("\u{E32E}  Tools", |ui| {
-                            for (panel, label) in [
-                                (SidePanel::Health, "Server health"),
-                                (SidePanel::Containers, "Containers"),
-                                (SidePanel::Snippets, "Snippets"),
-                                (SidePanel::History, "Command history"),
-                                (SidePanel::Ai, "AI command help"),
-                            ] {
+                        ui.menu_button(
+                            format!("{}  Split", crate::icons::SQUARE_SPLIT_HORIZONTAL),
+                            |ui| {
+                                if ui.button("Split right").clicked() {
+                                    actions.push(TermAction::Split(SplitLayout::Horizontal));
+                                    ui.close();
+                                }
+                                if ui.button("Split down").clicked() {
+                                    actions.push(TermAction::Split(SplitLayout::Vertical));
+                                    ui.close();
+                                }
+                                if ui.button("Add grid pane").clicked() {
+                                    actions.push(TermAction::Split(SplitLayout::Grid));
+                                    ui.close();
+                                }
+                            },
+                        );
+                        ui.menu_button(format!("{}  Tools", crate::icons::MONITOR), |ui| {
+                            for (panel, label) in SESSION_TOOLS {
                                 if ui
                                     .selectable_label(tab.side_panel == Some(panel), label)
                                     .clicked()
@@ -221,7 +231,14 @@ impl App {
                         if let Some(pane) = tab.panes.get(tab.active) {
                             let ssh = pane.session.target.protocol == crate::model::Protocol::Ssh;
                             if ui
-                                .add_enabled(ssh, egui::Button::new("\u{E0A0}  Files"))
+                                .add_enabled(
+                                    ssh,
+                                    forms::Btn::ghost(format!(
+                                        "{}  Files",
+                                        crate::icons::ARROWS_DOWN_UP
+                                    ))
+                                    .height(32.0),
+                                )
                                 .on_disabled_hover_text(
                                     "Open an SSH session to browse its remote files.",
                                 )
@@ -229,6 +246,10 @@ impl App {
                             {
                                 actions.push(TermAction::OpenSftp(pane.session.target.host_id));
                             }
+                        }
+                        if tab.panes.len() > 1 {
+                            forms::switch(ui, &mut tab.broadcast, "Broadcast input to all panes");
+                            ui.label(RichText::new("Broadcast").size(13.0).color(pal.text_dim));
                         }
                     });
                 });
@@ -291,30 +312,42 @@ impl App {
 
         // ---------- Side panel ----------
         if let Some(panel) = tab.side_panel {
+            // The terminal reflows once when the panel opens; only the panel's contents fade in,
+            // because terminal text must never animate.
+            let enter = motion::since_change(
+                ui.ctx(),
+                egui::Id::unique(("term-side-enter", tab_id)),
+                format!("{panel:?}"),
+                motion::PANEL,
+            );
             egui::Panel::right(egui::Id::unique(("term-side", tab_id)))
-                .default_size(288.0)
-                .size_range(240.0..=400.0)
+                .default_size(340.0)
+                .size_range(260.0..=440.0)
                 .resizable(true)
-                .frame(egui::Frame::new().fill(pal.panel).inner_margin(egui::Margin::same(12)).stroke(Stroke::new(1.0, pal.border)))
+                .frame(egui::Frame::new().fill(pal.sidebar).inner_margin(egui::Margin::same(16)))
                 .show(ui, |ui| {
+                    ui.set_opacity(enter);
                     ui.horizontal(|ui|{
-                        ui.label(RichText::new("SESSION TOOLS").small().color(pal.text_dim));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{if ui.add(ghost_button("×")).on_hover_text("Close session tools").clicked(){tab.side_panel=None;}});
+                        let width=(ui.available_width()-40.0).max(120.0);
+                        let shown=SESSION_TOOLS.iter().find(|(p,_)|*p==panel).map(|(_,l)|*l).unwrap_or("");
+                        forms::select(ui,"session-tool",width,shown,false,|ui|{
+                            for (next,label) in SESSION_TOOLS {
+                                if forms::option(ui,panel==next,label).clicked(){tab.side_panel=Some(next);ui.close();}
+                            }
+                        });
+                        if ui.add(forms::Btn::icon(crate::icons::X,"Close session tools")).on_hover_text("Close session tools").clicked(){tab.side_panel=None;}
                     });
-                    ui.horizontal_wrapped(|ui|{
-                        for(next,label)in [(SidePanel::Health,"Health"),(SidePanel::Containers,"Containers"),(SidePanel::Snippets,"Snippets"),(SidePanel::History,"History"),(SidePanel::Ai,"AI")]{if ui.selectable_label(panel==next,label).clicked(){tab.side_panel=Some(next);}}
-                    });ui.separator();
+                    ui.add_space(4.0);
                     match panel {
                     SidePanel::Snippets => {
-                        ui.label(RichText::new("Snippets").strong().size(16.0));
-                        ui.add(egui::TextEdit::singleline(&mut tab.snippet_filter).hint_text("Filter").desired_width(f32::INFINITY));
+                        forms::Input::bare("Filter snippets").hint("Filter").icon(crate::icons::MAGNIFYING_GLASS).show(ui,&mut tab.snippet_filter);
                         let q = tab.snippet_filter.to_lowercase();
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             for s in self.vault.snippets.iter().filter(|s| q.is_empty() || s.name.to_lowercase().contains(&q)) {
                                 let r = super::card_frame(pal)
                                     .show(ui, |ui| {
                                         ui.set_width(ui.available_width());
-                                        ui.label(RichText::new(&s.name).strong());
+                                        ui.label(RichText::new(&s.name).family(crate::fonts::semibold()));
                                         ui.label(RichText::new(s.script.lines().next().unwrap_or("")).monospace().small().color(pal.text_dim));
                                     })
                                     .response
@@ -329,8 +362,7 @@ impl App {
                         });
                     }
                     SidePanel::History => {
-                        ui.label(RichText::new("History").strong().size(16.0));
-                        ui.label(RichText::new("Click to paste into the terminal").small().color(pal.text_dim));
+                        forms::help(ui,"Click to paste into the terminal",pal);
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             for h in self.vault.history.iter().rev().take(300) {
                                 let r = ui.add(egui::Button::new(RichText::new(&h.command).monospace()).frame(false).wrap());
@@ -392,14 +424,8 @@ impl App {
                         }
                     }
                     SidePanel::Ai => {
-                        ui.label(RichText::new("\u{E6A2} AI command assistant").strong().size(16.0));
-                        ui.label(RichText::new("Describe what you want to do. The command is inserted, never run automatically.").small().color(pal.text_dim));
-                        let te = ui.add(
-                            egui::TextEdit::multiline(&mut tab.ai_query)
-                                .hint_text("e.g. find the 10 largest files under /var")
-                                .desired_rows(3)
-                                .desired_width(f32::INFINITY),
-                        );
+                        forms::help(ui,"Describe what you want to do. The command is inserted, never run automatically.",pal);
+                        let te = forms::text_area(ui,"",&mut tab.ai_query,3,false,"Find the 10 largest files under /var");
                         let submit = te.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
                         ui.horizontal(|ui| {
                             if (ui.add_enabled(!tab.ai_busy, super::primary_button("Generate", pal)).clicked() || submit) && !tab.ai_query.trim().is_empty() {
@@ -418,17 +444,17 @@ impl App {
                         match &tab.ai_result {
                             Some(Ok(cmd)) => {
                                 let cmd = cmd.clone();
-                                egui::Frame::new().fill(pal.bg).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                                egui::Frame::new().fill(pal.well).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
                                     ui.set_width(ui.available_width());
                                     ui.label(RichText::new(&cmd).monospace());
                                 });
                                 ui.horizontal(|ui| {
-                                    if ui.button("Insert").clicked() {
+                                    if ui.add(forms::Btn::secondary("Insert").small()).clicked() {
                                         if let Some(p) = tab.panes.get(tab.active) {
                                             p.session.send_text(&cmd);
                                         }
                                     }
-                                    if ui.button("Copy").clicked() {
+                                    if ui.add(forms::Btn::ghost("Copy").small()).clicked() {
                                         actions.push(TermAction::Copy(cmd.clone()));
                                     }
                                 });
@@ -464,7 +490,10 @@ impl App {
                             ))
                             .color(pal.warning),
                         );
-                        if ui.button("Stop broadcast").clicked() {
+                        if ui
+                            .add(forms::Btn::secondary("Stop broadcast").small())
+                            .clicked()
+                        {
                             tab.broadcast = false;
                         }
                     });
@@ -473,7 +502,7 @@ impl App {
         // ---------- Panes ----------
         let mut close_pane = None;
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(pal.bg))
+            .frame(egui::Frame::new().fill(pal.well))
             .show(ui, |ui| {
                 let area = ui.available_rect_before_wrap();
                 let rects = pane_rects(area, tab.panes.len(), tab.layout);
@@ -539,17 +568,27 @@ impl App {
                         backspace,
                     );
                     if multi {
-                        let border = if i == tab.active {
-                            pal.accent
-                        } else {
-                            pal.border
-                        };
+                        // The active pane wears the heat line along its top edge.
+                        let heat = motion::ease(
+                            ui.ctx(),
+                            egui::Id::unique(("pane-heat", pane.session.id)),
+                            i == tab.active,
+                            motion::HEAT,
+                        );
                         ui.painter().rect_stroke(
                             *rect,
                             0.0,
-                            Stroke::new(1.0, border),
+                            Stroke::new(1.0, pal.border),
                             egui::StrokeKind::Inside,
                         );
+                        if heat > 0.0 {
+                            let half = rect.width() / 2.0 * heat;
+                            ui.painter().hline(
+                                (rect.center().x - half)..=(rect.center().x + half),
+                                rect.top() + 1.0,
+                                Stroke::new(2.0, pal.accent),
+                            );
+                        }
                     }
                     if out.clicked {
                         new_active = Some(i);

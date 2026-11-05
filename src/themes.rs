@@ -28,24 +28,24 @@ pub fn schemes() -> Vec<TermScheme> {
     vec![
         scheme!(
             "Ferrum Night",
-            0x10141a,
-            0xeef1f6,
-            0x789aff,
-            0x243450,
+            0x0e0e10,
+            0xe8e6e1,
+            0xff8a4c,
+            0x2e2019,
             [
-                0x1b1e28, 0xff5f6d, 0x5fd38d, 0xf5c86a, 0x6e9bff, 0xc58cff, 0x5ad4e6, 0xc8ccd6,
-                0x4b5168, 0xff7a85, 0x7ce3a5, 0xffd98a, 0x8fb2ff, 0xd5a8ff, 0x7fe2f0, 0xffffff
+                0x1c1c1f, 0xf7808c, 0x6fd6a0, 0xebc85a, 0x7fb0e8, 0xc9a0e8, 0x63d2d8, 0xc8c6c0,
+                0x6e6e76, 0xff9aa4, 0x8ce4b6, 0xf5d97f, 0x9cc4ef, 0xdab8f0, 0x86e0e4, 0xf2f0eb
             ]
         ),
         scheme!(
             "Ferrum Day",
-            0xfbfbfd,
-            0x2b2f3a,
-            0x4a6cf7,
-            0xd3dcff,
+            0xfbfaf7,
+            0x1c1b19,
+            0xb5430f,
+            0xf7e4d8,
             [
-                0x2b2f3a, 0xd7263d, 0x1f9d55, 0xb7791f, 0x3554d1, 0x8e44ad, 0x0e8a9a, 0x9aa1b1,
-                0x5c6370, 0xe5484d, 0x2fb468, 0xd69e2e, 0x4a6cf7, 0xa55ec8, 0x15a3b5, 0x2b2f3a
+                0x1c1b19, 0xbe1e3a, 0x14774a, 0x7f6000, 0x28608f, 0x7d3f98, 0x0b7680, 0x8a867d,
+                0x5c5a54, 0xd8324f, 0x1d8f5b, 0x9a7600, 0x3576ab, 0x9353ad, 0x118c97, 0x1c1b19
             ]
         ),
         scheme!(
@@ -275,6 +275,45 @@ pub struct Palette {
     pub on_accent: Color32,
     /// Border for inputs and buttons; at least 3:1 against the surface.
     pub control_border: Color32,
+    /// Third text level: placeholders, separators, group counts. Still 4.5:1 on the page.
+    pub faint: Color32,
+    /// Data color for measured values, so meters never compete with the accent.
+    pub steel: Color32,
+    /// Well behind code-like content such as the equivalent command line.
+    pub well: Color32,
+    /// Translucent glow around a focused control.
+    pub ring: Color32,
+    /// Dim layer behind overlays.
+    pub scrim: Color32,
+}
+
+impl Palette {
+    /// Linear blend between two palettes, used for the theme crossfade.
+    pub fn lerp(self, to: Palette, t: f32) -> Palette {
+        let mix = |a: Color32, b: Color32| a.lerp_to_gamma(b, t);
+        Palette {
+            bg: mix(self.bg, to.bg),
+            sidebar: mix(self.sidebar, to.sidebar),
+            panel: mix(self.panel, to.panel),
+            card: mix(self.card, to.card),
+            card_hover: mix(self.card_hover, to.card_hover),
+            border: mix(self.border, to.border),
+            text: mix(self.text, to.text),
+            text_dim: mix(self.text_dim, to.text_dim),
+            accent: mix(self.accent, to.accent),
+            accent_soft: mix(self.accent_soft, to.accent_soft),
+            danger: mix(self.danger, to.danger),
+            success: mix(self.success, to.success),
+            warning: mix(self.warning, to.warning),
+            on_accent: mix(self.on_accent, to.on_accent),
+            control_border: mix(self.control_border, to.control_border),
+            faint: mix(self.faint, to.faint),
+            steel: mix(self.steel, to.steel),
+            well: mix(self.well, to.well),
+            ring: mix(self.ring, to.ring),
+            scrim: mix(self.scrim, to.scrim),
+        }
+    }
 }
 
 /// Near-black or white, whichever has more contrast against `bg`.
@@ -302,10 +341,10 @@ pub fn readable_on(bg: Color32) -> Color32 {
 
 /// Accent text and focus must remain readable in the current interface theme.
 /// Stored RGB preferences are unchanged; the rendered tone adapts to its surface.
-fn accent_on(color: Color32, background: Color32, ink: Color32) -> Color32 {
+fn accent_on(color: Color32, surfaces: &[Color32], ink: Color32) -> Color32 {
     let mut result = color;
     for _ in 0..24 {
-        if contrast_ratio(result, background) >= 4.5 {
+        if surfaces.iter().all(|s| contrast_ratio(result, *s) >= 4.5) {
             break;
         }
         result = result.lerp_to_gamma(ink, 0.1);
@@ -329,22 +368,26 @@ fn contrast_ratio(a: Color32, b: Color32) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
-pub const DEFAULT_ACCENT: [u8; 3] = [120, 154, 255];
+pub const DEFAULT_ACCENT: [u8; 3] = [255, 138, 76];
+/// Ferrum's previous default. Vaults saved with it move to ember once; see `Settings::migrate_accent`.
+pub const COBALT_ACCENT: [u8; 3] = [120, 154, 255];
+pub const PATINA_ACCENT: [u8; 3] = [88, 205, 180];
 
-/// Reusable Workbench geometry, in egui points.
+/// Reusable Forge geometry, in egui points.
 pub mod tokens {
     pub const CONTROL: f32 = 36.0;
     pub const PAGE: i8 = 24;
-    pub const INSET: i8 = 16;
     pub const RADIUS: u8 = 8;
-    pub const TITLE: f32 = 24.0;
-    pub const BODY: f32 = 14.0;
+    pub const RADIUS_LARGE: u8 = 12;
+    pub const TITLE: f32 = 22.0;
     pub const CAPTION: f32 = 12.0;
-    pub const SIDEBAR: f32 = 208.0;
-    pub const RAIL: f32 = 64.0;
-    pub const INSPECTOR: f32 = 288.0;
-    pub const ROW: f32 = 64.0;
-    pub const COMPACT_ROW: f32 = 48.0;
+    pub const SIDEBAR: f32 = 216.0;
+    pub const RAIL: f32 = 56.0;
+    pub const INSPECTOR: f32 = 320.0;
+    pub const ROW: f32 = 56.0;
+    pub const COMPACT_ROW: f32 = 42.0;
+    pub const BAR: f32 = 44.0;
+    pub const STATUS: f32 = 28.0;
 }
 
 pub fn palette(theme: UiTheme, rgb: [u8; 3]) -> Palette {
@@ -356,35 +399,45 @@ pub fn palette(theme: UiTheme, rgb: [u8; 3]) -> Palette {
         border,
         text,
         dim,
+        faint,
         control,
         success,
         warning,
         danger,
-        selection,
+        steel,
+        well,
     ) = match theme {
         UiTheme::Dark => (
-            0x171b22, 0x12161c, 0x202630, 0x293240, 0x343e4d, 0xeef1f6, 0xa9b3c2, 0x65758b,
-            0x6fcf9e, 0xe5bc75, 0xf18c96, 0x243450,
+            0x141416, 0x101012, 0x1c1c1f, 0x26262a, 0x2e2e33, 0xf2f0eb, 0xadaba5, 0x918f89,
+            0x6e6e76, 0x6fd6a0, 0xebc85a, 0xf7808c, 0x8fb6dc, 0x0e0e10,
         ),
         UiTheme::Midnight => (
-            0x0c1016, 0x080b10, 0x141a23, 0x202b3a, 0x303c4d, 0xeef1f6, 0xa9b3c2, 0x65758b,
-            0x6fcf9e, 0xe5bc75, 0xf18c96, 0x1c2d49,
+            0x0b0d12, 0x07090d, 0x12151c, 0x1b1f28, 0x242934, 0xeef1f6, 0xa6aebd, 0x8790a2,
+            0x66708a, 0x6fd6a0, 0xebc85a, 0xf7808c, 0x8fb6dc, 0x07090d,
         ),
         UiTheme::Light => (
-            0xf4f6f9, 0xe9edf3, 0xffffff, 0xe6ebf3, 0xd0d7e2, 0x19212d, 0x566171, 0x7a879a,
-            0x176c45, 0x815610, 0xb72e43, 0xdee7fc,
+            0xf6f4ef, 0xedeae3, 0xffffff, 0xf1eee8, 0xdfdbd2, 0x1c1b19, 0x5c5a54, 0x66635c,
+            0x8a867d, 0x14774a, 0x7f6000, 0xbe1e3a, 0x28608f, 0xfbfaf7,
         ),
     };
-    let raw = if theme == UiTheme::Light && rgb == DEFAULT_ACCENT {
-        h(0x315ccb)
-    } else {
-        Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+    // The three named accents have tuned tones per theme; anything else adapts below.
+    let (tuned, tuned_soft) = match (theme, rgb) {
+        (UiTheme::Dark, DEFAULT_ACCENT) => (0xff8a4c, Some(0x2e2019)),
+        (UiTheme::Midnight, DEFAULT_ACCENT) => (0xff9259, Some(0x2a1c16)),
+        (UiTheme::Light, DEFAULT_ACCENT) => (0xb5430f, Some(0xf7e4d8)),
+        (UiTheme::Light, COBALT_ACCENT) => (0x2f52c9, Some(0xdee5fb)),
+        (UiTheme::Light, PATINA_ACCENT) => (0x0f6f5c, Some(0xd5eee8)),
+        (_, COBALT_ACCENT) => (0x789aff, Some(0x222a42)),
+        (_, PATINA_ACCENT) => (0x58cdb4, Some(0x16302b)),
+        _ => (
+            ((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[2] as u32,
+            None,
+        ),
     };
-    let accent = accent_on(raw, h(hover), h(text));
-    let mut soft = if rgb == DEFAULT_ACCENT {
-        h(selection)
-    } else {
-        h(bg).lerp_to_gamma(accent, 0.12)
+    let accent = accent_on(h(tuned), &[h(bg), h(sidebar), h(panel), h(hover)], h(text));
+    let mut soft = match tuned_soft {
+        Some(soft) => h(soft),
+        None => h(bg).lerp_to_gamma(accent, 0.12),
     };
     // Dark custom accents can make a light selection too dark for secondary text.
     for _ in 0..24 {
@@ -393,6 +446,12 @@ pub fn palette(theme: UiTheme, rgb: [u8; 3]) -> Palette {
         }
         soft = soft.lerp_to_gamma(h(bg), 0.2);
     }
+    let ring = Color32::from_rgba_unmultiplied(
+        accent.r(),
+        accent.g(),
+        accent.b(),
+        if theme == UiTheme::Light { 56 } else { 72 },
+    );
     Palette {
         bg: h(bg),
         sidebar: h(sidebar),
@@ -407,61 +466,107 @@ pub fn palette(theme: UiTheme, rgb: [u8; 3]) -> Palette {
         danger: h(danger),
         success: h(success),
         warning: h(warning),
-        on_accent: readable_on(accent),
+        on_accent: if rgb == DEFAULT_ACCENT && theme != UiTheme::Light {
+            h(0x1c0d05)
+        } else {
+            readable_on(accent)
+        },
         control_border: h(control),
+        faint: h(faint),
+        steel: h(steel),
+        well: h(well),
+        ring,
+        scrim: if theme == UiTheme::Light {
+            Color32::from_rgba_unmultiplied(40, 36, 30, 82)
+        } else {
+            Color32::from_rgba_unmultiplied(6, 6, 8, 153)
+        },
     }
 }
 
+/// The palette currently applied to `ctx`, so widgets do not need it threaded through.
+pub fn current(ctx: &egui::Context) -> Palette {
+    ctx.data(|d| d.get_temp::<Palette>(egui::Id::unique("forge-palette")))
+        .unwrap_or_else(|| palette(UiTheme::Dark, DEFAULT_ACCENT))
+}
+
 pub fn apply_style(ctx: &egui::Context, theme: UiTheme, accent: [u8; 3]) {
-    let p = palette(theme, accent);
+    apply_palette(ctx, theme, palette(theme, accent));
+}
+
+pub fn apply_palette(ctx: &egui::Context, theme: UiTheme, p: Palette) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("forge-palette"), p));
     let mut v = if theme == UiTheme::Light {
         Visuals::light()
     } else {
         Visuals::dark()
     };
+    let radius = CornerRadius::same(tokens::RADIUS);
     v.panel_fill = p.bg;
     v.window_fill = p.panel;
-    v.extreme_bg_color = p.bg;
+    v.extreme_bg_color = p.well;
+    v.text_edit_bg_color = Some(p.card);
     v.faint_bg_color = p.card;
     v.override_text_color = Some(p.text);
     v.hyperlink_color = p.accent;
     v.selection.bg_fill = p.accent_soft;
     v.selection.stroke = Stroke::new(2.0, p.accent);
-    v.window_corner_radius = CornerRadius::same(12);
-    v.menu_corner_radius = CornerRadius::same(tokens::RADIUS);
-    v.window_stroke = Stroke::new(1.0, p.border);
+    v.window_corner_radius = CornerRadius::same(tokens::RADIUS_LARGE);
+    v.menu_corner_radius = radius;
+    v.window_stroke = Stroke::new(1.0, p.control_border);
+    v.popup_shadow = egui::epaint::Shadow {
+        offset: [0, 12],
+        blur: 40,
+        spread: 0,
+        color: Color32::from_black_alpha(if theme == UiTheme::Light { 46 } else { 128 }),
+    };
+    v.window_shadow = v.popup_shadow;
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
     v.widgets.noninteractive.bg_fill = p.card;
-    v.widgets.noninteractive.corner_radius = CornerRadius::same(tokens::RADIUS);
-    v.widgets.inactive.bg_fill = p.card;
+    v.widgets.noninteractive.corner_radius = radius;
+    v.widgets.inactive.bg_fill = p.card_hover;
     v.widgets.inactive.weak_bg_fill = p.card;
     v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.control_border);
-    v.widgets.inactive.corner_radius = CornerRadius::same(tokens::RADIUS);
+    v.widgets.inactive.corner_radius = radius;
     v.widgets.hovered.bg_fill = p.card_hover;
     v.widgets.hovered.weak_bg_fill = p.card_hover;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
-    v.widgets.hovered.corner_radius = CornerRadius::same(tokens::RADIUS);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.control_border);
+    v.widgets.hovered.expansion = 0.0;
+    v.widgets.hovered.corner_radius = radius;
     v.widgets.active.bg_fill = p.accent_soft;
     v.widgets.active.weak_bg_fill = p.accent_soft;
-    v.widgets.active.corner_radius = CornerRadius::same(tokens::RADIUS);
-    v.widgets.open.corner_radius = CornerRadius::same(tokens::RADIUS);
+    v.widgets.active.bg_stroke = Stroke::new(1.0, p.accent);
+    v.widgets.active.expansion = 0.0;
+    v.widgets.active.corner_radius = radius;
+    v.widgets.open.weak_bg_fill = p.card_hover;
+    v.widgets.open.bg_stroke = Stroke::new(1.0, p.accent);
+    v.widgets.open.corner_radius = radius;
     ctx.set_visuals(v);
+    let animation_time = if crate::ui::motion::reduced(ctx) {
+        0.0
+    } else {
+        crate::ui::motion::CONTROL
+    };
     ctx.global_style_mut(|s| {
         s.spacing.item_spacing = egui::vec2(8.0, 8.0);
         s.spacing.button_padding = egui::vec2(12.0, 6.0);
         s.spacing.interact_size.y = tokens::CONTROL;
+        s.spacing.menu_margin = egui::Margin::same(6);
+        s.animation_time = animation_time;
         s.text_styles
             .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
         s.text_styles
             .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
         s.text_styles.insert(
             egui::TextStyle::Heading,
-            egui::FontId::proportional(tokens::TITLE),
+            egui::FontId::new(tokens::TITLE, crate::fonts::semibold()),
         );
         s.text_styles.insert(
             egui::TextStyle::Small,
             egui::FontId::proportional(tokens::CAPTION),
         );
+        s.text_styles
+            .insert(egui::TextStyle::Monospace, egui::FontId::monospace(13.0));
     });
 }
 
@@ -510,6 +615,8 @@ mod contrast_tests {
         for theme in [UiTheme::Dark, UiTheme::Light, UiTheme::Midnight] {
             for rgb in [
                 DEFAULT_ACCENT,
+                COBALT_ACCENT,
+                PATINA_ACCENT,
                 [99, 132, 255],
                 [255, 255, 255],
                 [0, 0, 0],

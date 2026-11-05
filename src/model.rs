@@ -461,6 +461,9 @@ pub struct Settings {
     pub check_updates_on_startup: bool,
     pub ui_theme: UiTheme,
     pub accent: [u8; 3],
+    /// Set once a vault from before the Forge redesign has moved off the old default accent.
+    pub accent_migrated: bool,
+    pub reduce_motion: bool,
     pub terminal_scheme: String,
     pub font_size: f32,
     pub custom_font_path: String,
@@ -530,12 +533,27 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// The old blue default was saved into every vault, so it moves to ember once.
+    /// Picking Cobalt afterward sticks because the flag is already set.
+    pub fn migrate_accent(&mut self) {
+        if !self.accent_migrated {
+            if self.accent == crate::themes::COBALT_ACCENT {
+                self.accent = crate::themes::DEFAULT_ACCENT;
+            }
+            self.accent_migrated = true;
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             check_updates_on_startup: true,
             ui_theme: UiTheme::Dark,
             accent: crate::themes::DEFAULT_ACCENT,
+            accent_migrated: false,
+            reduce_motion: false,
             terminal_scheme: "Ferrum Night".into(),
             font_size: 14.0,
             custom_font_path: String::new(),
@@ -862,6 +880,15 @@ mod tests {
         let defaults: Settings = serde_json::from_str("{}").unwrap();
         assert!(!defaults.hosts_grid_view);
         assert_eq!(defaults.accent, crate::themes::DEFAULT_ACCENT);
+        let mut saved_blue: Settings = serde_json::from_str(r#"{"accent":[120,154,255]}"#).unwrap();
+        saved_blue.migrate_accent();
+        assert_eq!(saved_blue.accent, crate::themes::DEFAULT_ACCENT);
+        saved_blue.accent = crate::themes::COBALT_ACCENT;
+        saved_blue.migrate_accent();
+        assert_eq!(saved_blue.accent, crate::themes::COBALT_ACCENT);
+        let mut custom: Settings = serde_json::from_str(r#"{"accent":[9,20,40]}"#).unwrap();
+        custom.migrate_accent();
+        assert_eq!(custom.accent, [9, 20, 40]);
     }
 
     #[test]
