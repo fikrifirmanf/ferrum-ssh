@@ -15,7 +15,7 @@ use crate::store::{LoadOutcome, Store};
 use crate::themes::{self, Palette};
 use crate::ui::term_view::ViewState;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Page {
     Hosts,
     Keychain,
@@ -187,7 +187,6 @@ pub enum Dialog {
     },
     Serial {
         cfg: SerialConfig,
-        ports: Vec<String>,
     },
     InstallKey {
         key_id: Uuid,
@@ -298,6 +297,10 @@ pub struct App {
     pub cloud_busy: bool,
     pub last_activity: Instant,
     pub style_key: (UiTheme, [u8; 3]),
+    /// The palette drawn this frame; differs from the settings during a theme crossfade.
+    pub live_pal: Palette,
+    /// Where a running theme crossfade started from.
+    pub style_fade: Option<(Palette, f64)>,
     pub font_key: String,
     pub history_filter: String,
     pub key_search: String,
@@ -398,6 +401,8 @@ impl App {
             cloud_busy: false,
             last_activity: Instant::now(),
             style_key: (UiTheme::Dark, [0, 0, 0]),
+            live_pal: themes::palette(UiTheme::Dark, themes::DEFAULT_ACCENT),
+            style_fade: None,
             font_key: String::from("\u{0}"),
             history_filter: String::new(),
             key_search: String::new(),
@@ -442,7 +447,7 @@ impl App {
     }
 
     pub fn pal(&self) -> Palette {
-        themes::palette(self.vault.settings.ui_theme, self.vault.settings.accent)
+        self.live_pal
     }
 
     pub fn mark_dirty(&mut self) {
@@ -1111,10 +1116,30 @@ impl App {
     }
 
     fn ensure_style(&mut self, ctx: &egui::Context) {
+        self.vault.settings.migrate_accent();
+        crate::ui::motion::set_user_preference(ctx, self.vault.settings.reduce_motion);
         let key = (self.vault.settings.ui_theme, self.vault.settings.accent);
+        let target = themes::palette(key.0, key.1);
+        let now = ctx.input(|i| i.time);
         if key != self.style_key {
-            themes::apply_style(ctx, key.0, key.1);
+            let first = self.style_key.1 == [0, 0, 0];
+            self.style_fade =
+                (!first && !crate::ui::motion::reduced(ctx)).then_some((self.live_pal, now));
             self.style_key = key;
+            if self.style_fade.is_none() {
+                themes::apply_style(ctx, key.0, key.1);
+                self.live_pal = target;
+            }
+        }
+        if let Some((from, start)) = self.style_fade {
+            let t = ((now - start) as f32 / crate::ui::motion::PANEL).clamp(0.0, 1.0);
+            self.live_pal = from.lerp(target, emath::easing::cubic_out(t));
+            themes::apply_palette(ctx, key.0, self.live_pal);
+            if t >= 1.0 {
+                self.style_fade = None;
+            } else {
+                ctx.request_repaint();
+            }
         }
         if self.font_key != self.vault.settings.custom_font_path {
             self.font_key = self.vault.settings.custom_font_path.clone();
@@ -1331,27 +1356,26 @@ impl App {
             .frame(egui::Frame::new().fill(pal.bg))
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.add_space(ui.available_height() * 0.25);
-                    ui.label(RichText::new("\u{E308}").size(48.0));
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Ferrum is locked").size(24.0).strong());
+                    ui.add_space(ui.available_height() * 0.24);
+                    crate::ui::logo_mark(ui, 56.0);
+                    ui.add_space(16.0);
+                    crate::ui::forms::heading(ui, "Ferrum is locked", 22.0);
                     ui.label(
                         RichText::new("Enter your master password to unlock the vault")
                             .color(pal.text_dim),
                     );
-                    ui.add_space(16.0);
-                    let te = crate::ui::password_input(
-                        ui,
-                        &mut self.unlock_input,
-                        "Master password",
-                        280.0,
-                    );
+                    ui.add_space(20.0);
+                    let te = crate::ui::forms::Input::bare("Master password")
+                        .hint("Master password")
+                        .password()
+                        .width(320.0)
+                        .error(self.unlock_error.as_deref())
+                        .show(ui, &mut self.unlock_input);
                     te.request_focus();
-                    if let Some(e) = &self.unlock_error {
-                        ui.colored_label(pal.danger, e);
-                    }
-                    ui.add_space(8.0);
-                    let go = ui.add(crate::ui::primary_button("Unlock", pal)).clicked()
+                    ui.add_space(12.0);
+                    let go = ui
+                        .add(crate::ui::forms::Btn::primary("Unlock").min_width(320.0))
+                        .clicked()
                         || (te.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)));
                     if go {
                         self.try_unlock();
@@ -1360,7 +1384,13 @@ impl App {
                         ui.add_space(8.0);
                         let waiting = self.biometric_rx.is_some();
                         let label = format!("Unlock with {}", crate::biometric::NAME);
-                        if ui.add_enabled(!waiting, egui::Button::new(label)).clicked() {
+                        if ui
+                            .add_enabled(
+                                !waiting,
+                                crate::ui::forms::Btn::secondary(label).min_width(320.0),
+                            )
+                            .clicked()
+                        {
                             self.unlock_error = None;
                             self.start_biometric_unlock(ui.ctx());
                         }
@@ -1399,16 +1429,18 @@ impl App {
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        use crate::ui::forms;
         let pal = self.pal();
         egui::Panel::bottom("status")
-            .exact_size(32.0)
+            .exact_size(crate::themes::tokens::STATUS)
             .frame(
                 egui::Frame::new()
                     .fill(crate::ui::chrome_fill(pal.sidebar))
-                    .inner_margin(egui::Margin::symmetric(12, 4)),
+                    .inner_margin(egui::Margin::symmetric(12, 0)),
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 16.0;
                     let live = self
                         .tabs
                         .iter()
@@ -1419,21 +1451,28 @@ impl App {
                             _ => 0,
                         })
                         .sum::<usize>();
-                    let dot = if live > 0 { pal.success } else { pal.text_dim };
-                    ui.label(RichText::new("●").color(dot).small());
-                    ui.label(
-                        RichText::new(format!("{live} active sessions"))
-                            .small()
-                            .color(pal.text_dim),
-                    );
-                    ui.separator();
+                    let plural = |n: usize, one: &str| {
+                        if n == 1 {
+                            format!("1 {one}")
+                        } else {
+                            format!("{n} {one}s")
+                        }
+                    };
+                    ui.horizontal_centered(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        forms::dot(ui, if live > 0 { pal.success } else { pal.faint });
+                        ui.label(
+                            RichText::new(plural(live, "session"))
+                                .small()
+                                .color(pal.text_dim),
+                        );
+                    });
                     let fw = self.forwards.running_count();
                     ui.label(
-                        RichText::new(format!("\u{E0A0} {fw} tunnels"))
+                        RichText::new(plural(fw, "tunnel"))
                             .small()
                             .color(pal.text_dim),
                     );
-                    ui.separator();
                     let running = self
                         .transfers
                         .lock()
@@ -1443,7 +1482,7 @@ impl App {
                     if ui
                         .add(
                             egui::Label::new(
-                                RichText::new(format!("\u{E098} {running} transfers"))
+                                RichText::new(plural(running, "transfer"))
                                     .small()
                                     .color(pal.text_dim),
                             )
@@ -1455,28 +1494,38 @@ impl App {
                         self.show_transfers = !self.show_transfers;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "{}  Command palette",
-                                crate::ui::command_shortcut("K")
-                            ))
-                            .small()
-                            .color(pal.text_dim),
-                        );
-                        if !self.sync_status.is_empty() {
-                            ui.separator();
-                            ui.label(
-                                RichText::new(format!("\u{E1AA} {}", self.sync_status))
-                                    .small()
-                                    .color(pal.text_dim),
-                            );
+                        let mut theme = self.vault.settings.ui_theme;
+                        if forms::segmented_tiny(
+                            ui,
+                            "status-theme",
+                            &mut theme,
+                            &[
+                                (crate::model::UiTheme::Dark, "Iron"),
+                                (crate::model::UiTheme::Midnight, "Midnight"),
+                                (crate::model::UiTheme::Light, "Light"),
+                            ],
+                        ) {
+                            self.vault.settings.ui_theme = theme;
+                            crate::store::touch_settings(&mut self.vault);
+                            self.mark_dirty();
                         }
                         if self.store.master_password.is_some() {
-                            ui.separator();
                             ui.label(
-                                RichText::new("\u{E308} Vault encrypted with master password")
-                                    .small()
+                                RichText::new(crate::icons::LOCK_SIMPLE)
+                                    .size(14.0)
                                     .color(pal.text_dim),
+                            )
+                            .on_hover_text("Vault encrypted with master password");
+                        }
+                        if !self.sync_status.is_empty() {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} {}",
+                                    crate::icons::CLOUD,
+                                    self.sync_status
+                                ))
+                                .small()
+                                .color(pal.text_dim),
                             );
                         }
                     });
@@ -1542,7 +1591,11 @@ impl eframe::App for App {
         self.ensure_style(&ctx);
         self.updater.poll();
         self.application_menus(ui);
-        frame.set_traffic_lights_position(&ctx, egui::Rangef::new(0.0, 48.0), 16.0);
+        frame.set_traffic_lights_position(
+            &ctx,
+            egui::Rangef::new(0.0, crate::themes::tokens::BAR),
+            16.0,
+        );
         if self.host_test.as_ref().is_some_and(|test| {
             self.locked || !matches!(&self.editor, Some(Editor::Host(h, _)) if **h == test.host)
         }) {

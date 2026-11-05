@@ -28,11 +28,6 @@ pub fn show(
     browser: &mut Browser,
     source: Source,
 ) -> Option<Command> {
-    ui.label(
-        RichText::new(format!("{} Containers", crate::icons::PACKAGE))
-            .strong()
-            .size(16.0),
-    );
     let host = match source {
         Source::Ssh(host) => host,
         Source::Unsupported => {
@@ -84,7 +79,10 @@ pub fn show(
                     "Your user can't use the Docker socket. Add it to the docker group \
                      (sudo usermod -aG docker $USER, then reconnect), or use sudo.",
                 );
-                if ui.button("Retry with sudo").clicked() {
+                if ui
+                    .add(super::forms::Btn::secondary("Retry with sudo").small())
+                    .clicked()
+                {
                     command = Some(Command::UseSudo);
                 }
             }
@@ -100,11 +98,10 @@ pub fn show(
         }
         return command;
     }
-    ui.add(
-        egui::TextEdit::singleline(&mut browser.filter)
-            .hint_text("Filter")
-            .desired_width(f32::INFINITY),
-    );
+    super::forms::Input::bare("Filter containers")
+        .hint("Filter")
+        .icon(crate::icons::MAGNIFYING_GLASS)
+        .show(ui, &mut browser.filter);
     let query = browser.filter.to_lowercase();
     let busy = browser.busy.is_some();
     if let Some(label) = &browser.busy {
@@ -159,7 +156,7 @@ fn item_card(ui: &mut egui::Ui, pal: Palette, item: &Item, busy: bool) -> Option
                 pal.text_dim
             };
             ui.label(RichText::new(crate::icons::CIRCLE).color(color).small());
-            ui.label(RichText::new(&item.name).strong());
+            ui.label(RichText::new(&item.name).family(crate::fonts::semibold()));
         });
         let kube = item.runtime == Runtime::Kubernetes;
         let summary = if kube {
@@ -220,11 +217,17 @@ fn logs_view(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<C
     let mut close = false;
     let view = browser.logs.as_ref()?;
     ui.horizontal(|ui| {
-        if ui.button("‹ Back").clicked() {
+        if ui
+            .add(super::forms::Btn::ghost(format!("{}  Back", crate::icons::ARROW_LEFT)).small())
+            .clicked()
+        {
             close = true;
         }
-        ui.label(RichText::new(&view.item.name).strong());
-        if ui.button("Refresh").clicked() {
+        ui.label(RichText::new(&view.item.name).family(crate::fonts::semibold()));
+        if ui
+            .add(super::forms::Btn::secondary("Refresh").small())
+            .clicked()
+        {
             command = Some(Command::Logs(view.item.clone()));
         }
     });

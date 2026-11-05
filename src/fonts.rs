@@ -11,6 +11,27 @@ pub fn terminal_family() -> FontFamily {
     FontFamily::Name(TERMINAL_FAMILY.into())
 }
 
+/// Geist Medium: buttons, field labels, host names.
+pub fn medium() -> FontFamily {
+    FontFamily::Name("ui-medium".into())
+}
+
+/// Geist SemiBold: page titles and section headers.
+pub fn semibold() -> FontFamily {
+    FontFamily::Name("ui-semibold".into())
+}
+
+/// Geist Mono Medium: numbers that lead a meter or status line.
+pub fn mono_medium() -> FontFamily {
+    FontFamily::Name("mono-medium".into())
+}
+
+fn bundle(fonts: &mut FontDefinitions, name: &str, bytes: &'static [u8]) {
+    fonts
+        .font_data
+        .insert(name.into(), Arc::new(FontData::from_static(bytes)));
+}
+
 pub fn install(ctx: &egui::Context, custom_path: &str) {
     let mut fonts = FontDefinitions::default();
     // Prefer the platform UI face; egui's bundled proportional font remains the fallback.
@@ -32,6 +53,42 @@ pub fn install(ctx: &egui::Context, custom_path: &str) {
             .or_default()
             .insert(0, "platform-ui".into());
     }
+    // Geist leads the interface; the platform face stays behind it for scripts Geist lacks.
+    bundle(
+        &mut fonts,
+        "geist",
+        include_bytes!("../assets/fonts/Geist-Regular.ttf"),
+    );
+    bundle(
+        &mut fonts,
+        "geist-medium",
+        include_bytes!("../assets/fonts/Geist-Medium.ttf"),
+    );
+    bundle(
+        &mut fonts,
+        "geist-semibold",
+        include_bytes!("../assets/fonts/Geist-SemiBold.ttf"),
+    );
+    bundle(
+        &mut fonts,
+        "geist-mono",
+        include_bytes!("../assets/fonts/GeistMono-Regular.ttf"),
+    );
+    bundle(
+        &mut fonts,
+        "geist-mono-medium",
+        include_bytes!("../assets/fonts/GeistMono-Medium.ttf"),
+    );
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(0, "geist".into());
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .insert(0, "geist-mono".into());
     let mut term_list: Vec<String> = vec![];
     if !custom_path.trim().is_empty() {
         match std::fs::read(custom_path.trim()) {
@@ -79,6 +136,26 @@ pub fn install(ctx: &egui::Context, custom_path: &str) {
         if !prop.iter().any(|f| f == "Hack") {
             prop.push("Hack".into());
         }
+    }
+    // Weight families share every fallback with their regular family.
+    let proportional = fonts
+        .families
+        .get(&FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    let monospace = fonts
+        .families
+        .get(&FontFamily::Monospace)
+        .cloned()
+        .unwrap_or_default();
+    for (family, lead, base) in [
+        (medium(), "geist-medium", &proportional),
+        (semibold(), "geist-semibold", &proportional),
+        (mono_medium(), "geist-mono-medium", &monospace),
+    ] {
+        let mut list = vec![lead.to_string()];
+        list.extend(base.iter().cloned());
+        fonts.families.insert(family, list);
     }
     ctx.set_fonts(fonts);
 }

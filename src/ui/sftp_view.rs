@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use egui::{Align2, FontId, Key, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use uuid::Uuid;
 
-use super::{danger_button, ghost_button, primary_button};
+use super::{danger_button, forms, ghost_button, primary_button};
 use crate::app::{App, FsPane, SortKey, Tab};
 use crate::conn::AppEvent;
 use crate::model::Protocol;
@@ -74,7 +74,7 @@ impl App {
                 ui.label(
                     RichText::new("File transfer")
                         .size(crate::themes::tokens::TITLE)
-                        .strong(),
+                        .family(crate::fonts::semibold()),
                 );
                 ui.label(
                     RichText::new("Select files, then choose their destination.")
@@ -352,13 +352,13 @@ impl App {
             .resizable(true)
             .default_size((ui.ctx().content_rect().height()*0.28).clamp(90.0,180.0))
             .size_range(90.0..=(ui.ctx().content_rect().height()*0.4).clamp(90.0,420.0))
-            .frame(egui::Frame::new().fill(pal.panel).stroke(Stroke::new(1.0, pal.border)).inner_margin(egui::Margin::symmetric(14, 8)))
+            .frame(egui::Frame::new().fill(pal.sidebar).inner_margin(egui::Margin::symmetric(14, 8)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Transfer queue").strong());
+                    ui.label(RichText::new("Transfer queue").family(crate::fonts::semibold()));
                     ui.label(RichText::new(format!("{}", list.len())).small().color(pal.text_dim));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(ghost_button("×")).on_hover_text("Hide").clicked() {
+                        if ui.add(forms::Btn::icon(crate::icons::X,"Hide transfer queue")).on_hover_text("Hide").clicked() {
                             hide = true;
                         }
                         if ui.add(ghost_button("Clear finished")).clicked() {
@@ -377,19 +377,23 @@ impl App {
                         let total=t.total.load(Ordering::Relaxed);let done=t.done.load(Ordering::Relaxed);
                         let fraction=if total>0{(done as f32/total as f32).clamp(0.0,1.0)}else if status==TransferStatus::Done{1.0}else{0.0};
                         let (label,color)=match status{
-                            TransferStatus::Queued=>("Queued",pal.text_dim),TransferStatus::Running=>("Transferring",pal.accent),TransferStatus::Done=>("Completed",pal.success),TransferStatus::Failed=>("Failed",pal.danger),TransferStatus::Cancelled=>("Cancelled",pal.warning)
+                            TransferStatus::Queued=>("Queued",pal.text_dim),TransferStatus::Running=>("Transferring",pal.steel),TransferStatus::Done=>("Completed",pal.success),TransferStatus::Failed=>("Failed",pal.danger),TransferStatus::Cancelled=>("Cancelled",pal.warning)
                         };
                         ui.horizontal(|ui|{
                             ui.label(RichText::new(label).small().color(color));
-                            ui.add(egui::Label::new(RichText::new(&t.name).strong()).truncate()).on_hover_text(&t.name);
+                            ui.add(egui::Label::new(RichText::new(&t.name).family(crate::fonts::semibold())).truncate()).on_hover_text(&t.name);
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                                if matches!(status,TransferStatus::Running|TransferStatus::Queued)&&ui.small_button("Cancel transfer").clicked(){t.cancel.store(true,Ordering::Relaxed);}
-                                if matches!(status,TransferStatus::Failed|TransferStatus::Cancelled)&&self.transfer_retries.contains_key(&t.id)&&ui.small_button("Retry transfer").clicked(){retry=Some(t.id);}
+                                if matches!(status,TransferStatus::Running|TransferStatus::Queued)&&ui.add(forms::Btn::ghost("Cancel transfer").small()).clicked(){t.cancel.store(true,Ordering::Relaxed);}
+                                if matches!(status,TransferStatus::Failed|TransferStatus::Cancelled)&&self.transfer_retries.contains_key(&t.id)&&ui.add(forms::Btn::secondary("Retry transfer").small()).clicked(){retry=Some(t.id);}
                             });
                         });
                         let path=format!("{} → {}",t.from,t.to);
                         ui.add(egui::Label::new(RichText::new(&path).small().color(pal.text_dim)).truncate()).on_hover_text(path);
-                        ui.add(egui::ProgressBar::new(fraction).show_percentage().desired_width(ui.available_width()).fill(color));
+                        // Moves only with measured bytes, so it never animates on its own.
+                        let (track,_)=ui.allocate_exact_size(egui::vec2(ui.available_width(),6.0),egui::Sense::hover());
+                        ui.painter().rect_filled(track,3,pal.card_hover);
+                        if fraction>0.0{ui.painter().rect_filled(egui::Rect::from_min_size(track.min,egui::vec2((track.width()*fraction).max(4.0),6.0)),3,color);}
+                        ui.interact(track,ui.scope_id().with(("transfer-bar",t.id)),egui::Sense::hover()).on_hover_text(format!("{:.0}%",fraction*100.0));
                         let detail=match status{
                             TransferStatus::Failed=>t.error.lock().clone().unwrap_or_else(||"Transfer failed. Retry or check both locations.".into()),
                             TransferStatus::Running=>format!("{} / {} · {}/s",human_size(done),human_size(total),human_size((done as f64/t.started.elapsed().as_secs_f64().max(0.001))as u64)),
@@ -497,28 +501,37 @@ fn fs_pane(
                     "\u{E2A0}"
                 };
                 ui.label(RichText::new(icon).size(16.0));
-                ui.menu_button(RichText::new(format!("{label}  \u{E136}")).strong(), |ui| {
-                    ui.set_min_width(240.0);
-                    if ui.button("\u{E586}  Local computer").clicked() {
-                        actions.push(FsAction::UseLocal(id));
-                        ui.close();
-                    }
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .max_height(300.0)
-                        .show(ui, |ui| {
-                            for (hid, name, addr) in hosts {
-                                if ui
-                                    .button(format!("\u{E2A0}  {name}"))
-                                    .on_hover_text(addr)
-                                    .clicked()
-                                {
-                                    actions.push(FsAction::Connect(id, *hid));
-                                    ui.close();
+                ui.menu_button(
+                    RichText::new(format!("{label}  \u{E136}")).family(crate::fonts::semibold()),
+                    |ui| {
+                        ui.set_min_width(240.0);
+                        if ui
+                            .add(forms::Btn::secondary(format!(
+                                "{}  Local computer",
+                                crate::icons::LAPTOP
+                            )))
+                            .clicked()
+                        {
+                            actions.push(FsAction::UseLocal(id));
+                            ui.close();
+                        }
+                        ui.separator();
+                        egui::ScrollArea::vertical()
+                            .max_height(300.0)
+                            .show(ui, |ui| {
+                                for (hid, name, addr) in hosts {
+                                    if ui
+                                        .button(format!("\u{E2A0}  {name}"))
+                                        .on_hover_text(addr)
+                                        .clicked()
+                                    {
+                                        actions.push(FsAction::Connect(id, *hid));
+                                        ui.close();
+                                    }
                                 }
-                            }
-                        });
-                });
+                            });
+                    },
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if matches!(p.backend, Some(Backend::Remote { .. }))
                         && ui
@@ -584,24 +597,27 @@ fn fs_pane(
                         actions.push(FsAction::Navigate(id, par));
                     }
                 }
-                if ui.button("\u{E094}").on_hover_text("Refresh").clicked() {
+                if ui
+                    .add(forms::Btn::icon(crate::icons::ARROWS_CLOCKWISE, "Refresh"))
+                    .on_hover_text("Refresh")
+                    .clicked()
+                {
                     p.forward.clear();
                     actions.push(FsAction::Navigate(id, p.path.clone()));
                     p.path.clear();
                 }
-                let r = ui.add(
-                    egui::TextEdit::singleline(&mut p.path_edit)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width((ui.available_width() - 160.0).max(80.0)),
-                );
+                let r = forms::Input::bare("Path")
+                    .mono()
+                    .width((ui.available_width() - 160.0).max(80.0))
+                    .show(ui, &mut p.path_edit);
                 if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     actions.push(FsAction::Navigate(id, p.path_edit.trim().to_string()));
                 }
-                ui.add(
-                    egui::TextEdit::singleline(&mut p.filter)
-                        .hint_text("\u{E30C} Filter")
-                        .desired_width(140.0),
-                );
+                forms::Input::bare("Filter files")
+                    .hint("Filter")
+                    .icon(crate::icons::MAGNIFYING_GLASS)
+                    .width(150.0)
+                    .show(ui, &mut p.filter);
             });
 
             // ----- Directional actions -----
@@ -809,7 +825,11 @@ fn host_picker(
     pal: Palette,
     actions: &mut Vec<FsAction>,
 ) {
-    ui.label(RichText::new("Open a location").size(16.0).strong());
+    ui.label(
+        RichText::new("Open a location")
+            .size(16.0)
+            .family(crate::fonts::semibold()),
+    );
     ui.label(
         RichText::new("Pick a saved SSH host to browse over SFTP, or your local files.")
             .color(pal.text_dim),
@@ -899,7 +919,7 @@ fn inline_forms(
         let mut done = None;
         form(ui, &mut |ui| {
             ui.label("New folder");
-            let r = ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
+            let r = forms::Input::bare("Name").show(ui, name);
             r.request_focus();
             if (ui.add(primary_button("Create", pal)).clicked() || enter(ui, &r))
                 && !name.trim().is_empty()
@@ -921,7 +941,7 @@ fn inline_forms(
         let mut done = None;
         form(ui, &mut |ui| {
             ui.label("New file");
-            let r = ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
+            let r = forms::Input::bare("Name").show(ui, name);
             r.request_focus();
             if (ui.add(primary_button("Create", pal)).clicked() || enter(ui, &r))
                 && !name.trim().is_empty()
@@ -943,7 +963,7 @@ fn inline_forms(
         let mut done = None;
         form(ui, &mut |ui| {
             ui.label("Rename to");
-            let r = ui.add(egui::TextEdit::singleline(name).desired_width(220.0));
+            let r = forms::Input::bare("Name").show(ui, name);
             if (ui.add(primary_button("Rename", pal)).clicked() || enter(ui, &r))
                 && !name.trim().is_empty()
             {
@@ -969,7 +989,7 @@ fn inline_forms(
                         "Permissions · {}",
                         path.rsplit('/').next().unwrap_or(path)
                     ))
-                    .strong(),
+                    .family(crate::fonts::semibold()),
                 );
                 egui::Grid::new(("chmod", id))
                     .spacing([10.0, 2.0])

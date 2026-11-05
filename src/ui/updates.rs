@@ -6,7 +6,11 @@ impl App {
     pub fn update_dialog(&mut self, ui: &mut egui::Ui) -> bool {
         let mut close = false;
         let pal = self.pal();
-        ui.label(egui::RichText::new("Software updates").size(20.0).strong());
+        ui.label(
+            egui::RichText::new("Software updates")
+                .size(20.0)
+                .family(crate::fonts::semibold()),
+        );
         ui.label(format!("Installed version: {}", env!("CARGO_PKG_VERSION")));
         ui.add_space(12.0);
         ui.add_enabled_ui(!self.updater.busy(), |ui| {
@@ -42,7 +46,7 @@ impl App {
             State::Available(release) => {
                 ui.label(
                     egui::RichText::new(format!("Ferrum {} is available", release.tag_name))
-                        .strong(),
+                        .family(crate::fonts::semibold()),
                 );
                 egui::ScrollArea::vertical()
                     .max_height(160.0)
@@ -138,7 +142,7 @@ impl App {
                 self.updater.check(self.rt.handle(), ui.ctx());
             }
             ui.hyperlink_to("GitHub releases", RELEASES_URL);
-            if ui.button("Close").clicked() {
+            if ui.add(super::forms::Btn::ghost("Close")).clicked() {
                 close = true;
             }
         });
@@ -175,12 +179,14 @@ impl App {
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-24.0, 76.0))
             .frame(
                 egui::Frame::window(&ctx.global_style())
-                    .fill(pal.panel)
+                    .fill(pal.card)
+                    .stroke(egui::Stroke::new(1.0, pal.control_border))
                     .inner_margin(20),
             )
             .show(ctx, |ui| {
                 ui.label(
-                    egui::RichText::new(format!("Ferrum {tag} is ready to download")).strong(),
+                    egui::RichText::new(format!("Ferrum {tag} is ready to download"))
+                        .family(crate::fonts::semibold()),
                 );
                 ui.label(
                     "Review the release when it suits you. Your current session can keep running.",
@@ -188,7 +194,7 @@ impl App {
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     review = ui.add(primary_button("View update", pal)).clicked();
-                    later = ui.button("Later").clicked();
+                    later = ui.add(super::forms::Btn::ghost("Later")).clicked();
                 });
             });
         if !open || later || review || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {

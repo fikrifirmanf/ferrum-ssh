@@ -1145,7 +1145,7 @@ fn url_at(text: &str, map: &[usize], col: usize) -> Option<String> {
 
 fn search_overlay(ui: &mut egui::Ui, sess: &mut Session, st: &mut ViewState, area: Rect) {
     let pos = Pos2::new(area.right() - 360.0, area.top() + 10.0);
-    egui::Area::new(egui::Id::new(("term-search", sess.id)))
+    egui::Area::new(egui::Id::unique(("term-search", sess.id)))
         .fixed_pos(pos)
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {

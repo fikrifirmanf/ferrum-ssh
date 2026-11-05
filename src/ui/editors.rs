@@ -1,9 +1,9 @@
 //! Focused editor workspace for hosts, groups, identities, keys, port forwarding rules and snippets.
 
-use egui::{RichText, TextEdit};
+use egui::RichText;
 use uuid::Uuid;
 
-use super::{danger_button, primary_button, section_title};
+use super::{forms, motion};
 use crate::app::{App, Dialog, Editor};
 use crate::model::*;
 use crate::themes::Palette;
@@ -31,63 +31,107 @@ enum Outcome {
     Delete,
 }
 
-fn field(ui: &mut egui::Ui, label: &str, pal: Palette) {
-    ui.label(RichText::new(label).small().color(pal.text_dim));
-}
-
-fn opt_text(ui: &mut egui::Ui, value: &mut Option<String>, hint: &str, password: bool) {
-    let mut s = value.clone().unwrap_or_default();
-    let r = if password {
-        super::password_input(ui, &mut s, hint, f32::INFINITY)
-    } else {
-        ui.add(
-            TextEdit::singleline(&mut s)
-                .hint_text(hint)
-                .desired_width(f32::INFINITY),
-        )
-    };
-    if r.changed() {
-        *value = if s.is_empty() { None } else { Some(s) };
-    }
-}
-
-fn combo_uuid(
+/// Picks one id from a list, or none. The chosen label shows even while inheriting.
+fn select_uuid(
     ui: &mut egui::Ui,
-    id: &str,
+    title: &str,
     value: &mut Option<Uuid>,
     items: &[(Uuid, String)],
     none_label: &str,
 ) {
-    let current = value
-        .and_then(|v| items.iter().find(|(i, _)| *i == v).map(|(_, l)| l.clone()))
-        .unwrap_or_else(|| none_label.to_string());
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(current)
-        .width(ui.available_width())
-        .show_ui(ui, |ui| {
-            ui.selectable_value(value, None, none_label);
+    let pal = crate::themes::current(ui.ctx());
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        forms::label(ui, title, pal);
+        let shown = value
+            .and_then(|v| items.iter().find(|(i, _)| *i == v).map(|(_, l)| l.clone()))
+            .unwrap_or_else(|| none_label.to_string());
+        let width = ui.available_width();
+        forms::select(ui, title, width, &shown, false, |ui| {
+            forms::select_value(ui, value, None, none_label);
             for (i, l) in items {
-                ui.selectable_value(value, Some(*i), l);
+                forms::select_value(ui, value, Some(*i), l);
             }
         });
+    });
 }
 
-fn tri_toggle(ui: &mut egui::Ui, label: &str, value: &mut Option<bool>, inherited: bool) {
-    ui.horizontal(|ui| {
-        let mut v = value.unwrap_or(inherited);
-        if ui.checkbox(&mut v, label).changed() {
-            *value = Some(v);
+/// What the host draft would run in a terminal. Vault keys and passwords have no file or flag
+/// to show, so they stay out, and a host with neither address nor user shows placeholders.
+pub fn equivalent_command(h: &Host, r: &ResolvedTarget) -> String {
+    let host = if h.address.trim().is_empty() {
+        "<host>"
+    } else {
+        h.address.trim()
+    };
+    let user = if r.username.is_empty() {
+        "<user>"
+    } else {
+        r.username.as_str()
+    };
+    match h.protocol {
+        Protocol::Serial => format!("screen {} {}", h.serial.device, h.serial.baud_rate),
+        Protocol::Telnet => format!("telnet {host} {}", r.port),
+        Protocol::Mosh => {
+            let ssh = if r.port == Protocol::Ssh.default_port() {
+                String::new()
+            } else {
+                format!("--ssh=\"ssh -p {}\" ", r.port)
+            };
+            format!("mosh {ssh}{user}@{host}")
         }
-        if value.is_none() {
-            ui.label(RichText::new("(inherited)").small().weak());
-        } else if ui
-            .small_button("reset")
-            .on_hover_text("Inherit from group / defaults")
-            .clicked()
-        {
-            *value = None;
+        Protocol::Local => "$SHELL".into(),
+        Protocol::Ssh => {
+            let mut parts = vec!["ssh".to_string()];
+            if r.port != Protocol::Ssh.default_port() {
+                parts.push(format!("-p {}", r.port));
+            }
+            if !r.chain.is_empty() {
+                let jumps: Vec<String> = r
+                    .chain
+                    .iter()
+                    .map(|j| {
+                        let port = if j.port == 22 {
+                            String::new()
+                        } else {
+                            format!(":{}", j.port)
+                        };
+                        if j.username.is_empty() {
+                            format!("{}{port}", j.address)
+                        } else {
+                            format!("{}@{}{port}", j.username, j.address)
+                        }
+                    })
+                    .collect();
+                parts.push(format!("-J {}", jumps.join(",")));
+            }
+            if r.agent_forwarding {
+                parts.push("-A".into());
+            }
+            if let Some(proxy) = &r.proxy {
+                let command = match proxy.kind {
+                    ProxyKind::Command => proxy.command.clone(),
+                    ProxyKind::Socks5 => {
+                        format!("nc -X 5 -x {}:{} %h %p", proxy.host, proxy.port)
+                    }
+                    ProxyKind::Http => {
+                        format!("nc -X connect -x {}:{} %h %p", proxy.host, proxy.port)
+                    }
+                };
+                parts.push(format!("-o ProxyCommand=\"{command}\""));
+            }
+            parts.push(format!("{user}@{host}"));
+            parts.join(" ")
         }
-    });
+    }
+}
+
+fn plural(count: usize, one: &str) -> String {
+    if count == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{count} {one}s")
+    }
 }
 
 impl App {
@@ -121,7 +165,7 @@ impl App {
         });
     }
 
-    fn host_test_control(&mut self, ui: &mut egui::Ui, host: &mut Host, pal: Palette) {
+    fn poll_host_test(&mut self, host: &mut Host) {
         if !matches!(host.protocol, Protocol::Ssh | Protocol::Mosh) {
             return;
         }
@@ -145,68 +189,83 @@ impl App {
                     .retain(|p| p.req.as_ref().is_none_or(|r| r.session != test.session));
             }
         }
-        let busy = self.host_test.as_ref().is_some_and(|t| t.outcome.is_none());
-        super::card_frame(pal).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(
-                        !busy && !host.address.trim().is_empty(),
-                        egui::Button::new(if host.protocol == Protocol::Mosh {
-                            "Test SSH login"
-                        } else {
-                            "Test connection"
-                        }),
-                    )
-                    .clicked()
-                {
-                    self.test_host(host);
-                }
-                if busy {
-                    ui.spinner();
-                    if ui.add(super::ghost_button("Cancel")).clicked() {
-                        self.cancel_host_test();
-                    }
-                }
-            });
-            if let Some(test) = &self.host_test {
-                match &test.outcome {
-                    Some(Ok(os)) => {
-                        ui.label(
-                            RichText::new(format!(
-                                "{}  SSH login successful",
-                                crate::icons::CHECK_CIRCLE
-                            ))
-                            .color(pal.success),
-                        );
-                        if let Some(os) = os {
-                            ui.label(RichText::new(os).small().color(pal.text_dim));
-                            host.os = Some(os.clone());
-                        }
-                    }
-                    Some(Err(error)) => {
-                        ui.label(RichText::new("Connection failed").color(pal.danger));
-                        ui.label(RichText::new(error).small().color(pal.text_dim));
-                    }
-                    None => {
-                        ui.label(
-                            RichText::new("Connecting and checking your SSH login…")
-                                .small()
-                                .color(pal.text_dim),
-                        );
-                    }
-                }
-            } else {
-                ui.label(
-                    RichText::new("Check your SSH login before saving this host.")
-                        .small()
-                        .color(pal.text_dim),
-                );
+        if let Some(test) = &self.host_test {
+            if let Some(Ok(Some(os))) = &test.outcome {
+                host.os = Some(os.clone());
             }
-        });
+        }
         // OS detection updates the draft; keep the test tied to that updated draft.
         if let Some(test) = &mut self.host_test {
             test.host.os = host.os.clone();
+        }
+    }
+
+    /// The result sits right above the Test button and folds open, so feedback lands where
+    /// the eye already is. Failed results keep every field untouched.
+    fn host_test_result(&mut self, ui: &mut egui::Ui, pal: Palette) {
+        let outcome = self
+            .host_test
+            .as_ref()
+            .and_then(|test| test.outcome.as_ref())
+            .cloned();
+        forms::reveal(
+            ui,
+            egui::Id::unique("host-test-result"),
+            outcome.is_some(),
+            |ui| {
+                let Some(outcome) = &outcome else {
+                    return;
+                };
+                egui::Frame::new()
+                    .fill(pal.card)
+                    .stroke(egui::Stroke::new(1.0, pal.border))
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        match outcome {
+                            Ok(os) => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{}  SSH login successful",
+                                        crate::icons::CHECK_CIRCLE
+                                    ))
+                                    .family(crate::fonts::medium())
+                                    .color(pal.success),
+                                );
+                                if let Some(os) = os {
+                                    forms::help(ui, os, pal);
+                                }
+                            }
+                            Err(error) => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{}  Connection failed",
+                                        crate::icons::X_CIRCLE
+                                    ))
+                                    .family(crate::fonts::medium())
+                                    .color(pal.danger),
+                                );
+                                forms::help(ui, error, pal);
+                            }
+                        }
+                    });
+                ui.add_space(8.0);
+            },
+        );
+    }
+
+    fn editor_is_dirty(&self, ed: &Editor) -> bool {
+        match ed {
+            Editor::Host(h, new) => !*new && self.vault.host(h.id).is_none_or(|x| x != &**h),
+            Editor::Group(g, new) => !*new && self.vault.group(g.id).is_none_or(|x| x != g),
+            Editor::Identity(i, new) => !*new && self.vault.identity(i.id).is_none_or(|x| x != i),
+            Editor::Key(k, new) => !*new && self.vault.key(k.id).is_none_or(|x| x != k),
+            Editor::Forward(f, new) => {
+                !*new && self.vault.forwards.iter().find(|x| x.id == f.id) != Some(f)
+            }
+            Editor::Snippet(s, new) => !*new && self.vault.snippet(s.id).is_none_or(|x| x != s),
         }
     }
 
@@ -216,85 +275,154 @@ impl App {
         };
         let pal = self.pal();
         let mut outcome = Outcome::Keep;
-        let (title, is_new) = match &ed {
-            Editor::Host(_, n) => ("Host", *n),
-            Editor::Group(_, n) => ("Group", *n),
-            Editor::Identity(_, n) => ("Identity", *n),
-            Editor::Key(_, n) => ("Key", *n),
-            Editor::Forward(_, n) => ("Port forwarding rule", *n),
-            Editor::Snippet(_, n) => ("Snippet", *n),
+        let (title, is_new, back) = match &ed {
+            Editor::Host(_, n) => ("host", *n, "Hosts"),
+            Editor::Group(_, n) => ("group", *n, "Hosts"),
+            Editor::Identity(_, n) => ("identity", *n, "Keychain"),
+            Editor::Key(_, n) => ("key", *n, "Keychain"),
+            Editor::Forward(_, n) => ("port forwarding rule", *n, "Port forwarding"),
+            Editor::Snippet(_, n) => ("snippet", *n, "Snippets"),
         };
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(if is_new {
-                    format!("New {}", title.to_lowercase())
-                } else {
-                    format!("Edit {}", title.to_lowercase())
-                })
-                .size(crate::themes::tokens::TITLE)
-                .strong(),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(super::ghost_button("Back to library")).clicked()
-                    || ui.input(|i| i.key_pressed(egui::Key::Escape))
-                {
-                    outcome = Outcome::Close;
-                }
-            });
-        });
-        ui.separator();
-        let footer_h = if matches!(&ed, Editor::Host(h, _) if matches!(h.protocol, Protocol::Ssh | Protocol::Mosh))
+        let dirty = self.editor_is_dirty(&ed);
+        if ui
+            .add(forms::Btn::ghost(format!("{}  {back}", crate::icons::ARROW_LEFT)).small())
+            .clicked()
+            || ui.input(|i| i.key_pressed(egui::Key::Escape))
         {
-            168.0
-        } else {
-            52.0
-        };
-        egui::ScrollArea::vertical()
-            .max_height((ui.available_height() - footer_h).max(80.0))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
-                match &mut ed {
-                    Editor::Host(h, _) => {
-                        ui.push_id(h.id, |ui| self.host_form(ui, h, pal));
-                    }
-                    Editor::Group(g, _) => self.group_form(ui, g, pal),
-                    Editor::Identity(i, _) => self.identity_form(ui, i, pal),
-                    Editor::Key(k, n) => self.key_form(ui, k, *n, pal),
-                    Editor::Forward(f, _) => self.forward_form(ui, f, pal),
-                    Editor::Snippet(s, _) => self.snippet_form(ui, s, pal),
-                }
-            });
-        if let Editor::Host(h, _) = &mut ed {
-            ui.add_space(8.0);
-            self.host_test_control(ui, h, pal);
+            outcome = Outcome::Close;
         }
-        ui.separator();
         ui.horizontal(|ui| {
-            if ui.add(egui::Button::new("Save changes")).clicked()
-                || ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S))
-            {
-                outcome = Outcome::Save;
+            ui.spacing_mut().item_spacing.x = 12.0;
+            forms::heading(
+                ui,
+                &format!("{} {title}", if is_new { "New" } else { "Edit" }),
+                crate::themes::tokens::TITLE,
+            );
+            let shown = motion::ease(
+                ui.ctx(),
+                egui::Id::unique("editor-dirty"),
+                dirty,
+                motion::CONTROL,
+            );
+            if shown > 0.0 {
+                ui.scope(|ui| {
+                    ui.set_opacity(shown);
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    forms::dot(ui, pal.accent);
+                    ui.label(RichText::new("Unsaved changes").small().color(pal.text_dim));
+                });
             }
-            if let Editor::Host(..) = ed {
-                if ui.add(primary_button("Save and connect", pal)).clicked() {
-                    outcome = Outcome::SaveAndConnect;
+        });
+        ui.add_space(4.0);
+        let footer_key = egui::Id::unique("editor-footer-height");
+        let footer_h = ui.data(|d| d.get_temp::<f32>(footer_key).unwrap_or(60.0));
+        let body_height = (ui.available_height() - footer_h).max(80.0);
+        // The scroll area overhangs the column by 4 pt so focus rings are not clipped.
+        let overhang = egui::Rect::from_min_size(
+            ui.cursor().min - egui::vec2(4.0, 0.0),
+            egui::vec2(ui.available_width() + 8.0, body_height),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(overhang), |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(body_height)
+                .min_scrolled_height(body_height.min(80.0))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin::symmetric(4, 4))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 12.0;
+                            match &mut ed {
+                                Editor::Host(h, _) => {
+                                    ui.push_id(h.id, |ui| self.host_form(ui, h, pal));
+                                }
+                                Editor::Group(g, _) => self.group_form(ui, g, pal),
+                                Editor::Identity(i, _) => self.identity_form(ui, i, pal),
+                                Editor::Key(k, n) => self.key_form(ui, k, *n, pal),
+                                Editor::Forward(f, _) => self.forward_form(ui, f, pal),
+                                Editor::Snippet(s, _) => self.snippet_form(ui, s, pal),
+                            }
+                        });
+                });
+        });
+        let footer_top = ui.cursor().top();
+        ui.painter().hline(
+            ui.min_rect().x_range(),
+            footer_top,
+            egui::Stroke::new(1.0, pal.border),
+        );
+        ui.add_space(12.0);
+        if let Editor::Host(h, _) = &mut ed {
+            self.poll_host_test(h);
+            self.host_test_result(ui, pal);
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if let Editor::Host(h, _) = &mut ed {
+                if matches!(h.protocol, Protocol::Ssh | Protocol::Mosh) {
+                    let busy = self.host_test.as_ref().is_some_and(|t| t.outcome.is_none());
+                    let label = if busy {
+                        "Testing…"
+                    } else if h.protocol == Protocol::Mosh {
+                        "Test SSH login"
+                    } else {
+                        "Test connection"
+                    };
+                    if ui
+                        .add_enabled(
+                            !busy && !h.address.trim().is_empty(),
+                            forms::Btn::secondary(label),
+                        )
+                        .clicked()
+                    {
+                        self.test_host(h);
+                    }
+                    if busy {
+                        ui.spinner();
+                        if ui.add(forms::Btn::ghost("Cancel")).clicked() {
+                            self.cancel_host_test();
+                        }
+                    }
                 }
             }
             if let Editor::Snippet(s, _) = &ed {
-                if ui.button("\u{E3D0} Run").clicked() {
+                if ui
+                    .add(forms::Btn::secondary(format!(
+                        "{}  Run",
+                        crate::icons::PLAY
+                    )))
+                    .clicked()
+                {
                     let s = s.clone();
                     self.begin_run_snippet(s);
                 }
             }
-            if !is_new {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(danger_button("Delete", pal)).clicked() {
-                        outcome = Outcome::Delete;
-                    }
-                });
+            if !is_new && ui.add(forms::Btn::danger("Delete")).clicked() {
+                outcome = Outcome::Delete;
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let is_host = matches!(ed, Editor::Host(..));
+                if is_host {
+                    if ui.add(forms::Btn::primary("Save and connect")).clicked() {
+                        outcome = Outcome::SaveAndConnect;
+                    }
+                }
+                let can_save = is_new || dirty;
+                let save = if is_host {
+                    forms::Btn::ghost("Save")
+                } else {
+                    forms::Btn::primary("Save")
+                };
+                if ui.add_enabled(can_save, save).clicked()
+                    || (can_save
+                        && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::S)))
+                {
+                    outcome = Outcome::Save;
+                }
+            });
         });
+        let footer_bottom = ui.min_rect().bottom();
+        ui.data_mut(|d| d.insert_temp(footer_key, (footer_bottom - footer_top + 8.0).max(48.0)));
 
         match outcome {
             Outcome::Keep => self.editor = Some(ed),
@@ -315,15 +443,27 @@ impl App {
             }
             Outcome::Save | Outcome::SaveAndConnect => {
                 let connect = matches!(outcome, Outcome::SaveAndConnect);
-                if let Err(msg) = self.commit_editor(ed, connect) {
-                    self.toast(msg, true);
+                match self.commit_editor(ed, connect) {
+                    Ok(saved) => self.toast(format!("Saved {saved}"), false),
+                    Err(msg) => {
+                        ui.data_mut(|d| d.insert_temp(address_error_key(), true));
+                        self.toast(msg, true);
+                    }
                 }
             }
         }
     }
 
-    fn commit_editor(&mut self, ed: Editor, connect: bool) -> Result<(), String> {
+    fn commit_editor(&mut self, ed: Editor, connect: bool) -> Result<String, String> {
         let ts = now_ts();
+        let saved = match &ed {
+            Editor::Host(h, _) => h.display_name(),
+            Editor::Group(g, _) => g.name.clone(),
+            Editor::Identity(i, _) => i.label.clone(),
+            Editor::Key(k, _) => k.label.clone(),
+            Editor::Forward(f, _) => f.label.clone(),
+            Editor::Snippet(s, _) => s.name.clone(),
+        };
         macro_rules! upsert {
             ($list:expr, $item:expr) => {{
                 let mut item = $item;
@@ -368,480 +508,676 @@ impl App {
             Editor::Snippet(s, _) => upsert!(self.vault.snippets, s),
         }
         self.mark_dirty();
-        Ok(())
+        Ok(saved)
     }
 
     fn host_form(&mut self, ui: &mut egui::Ui, h: &mut Host, pal: Palette) {
-        section_title(ui, "Address", pal);
-        ui.horizontal(|ui| {
-            for p in [
-                Protocol::Ssh,
-                Protocol::Mosh,
-                Protocol::Telnet,
-                Protocol::Serial,
-            ] {
-                ui.selectable_value(&mut h.protocol, p, p.label());
-            }
-        });
-        if h.protocol != Protocol::Serial {
-            field(ui, "Hostname or IP", pal);
-            ui.add(
-                TextEdit::singleline(&mut h.address)
-                    .hint_text("example.com")
-                    .desired_width(f32::INFINITY),
-            );
-        }
-        field(ui, "Label", pal);
-        ui.add(
-            TextEdit::singleline(&mut h.label)
-                .hint_text("My server")
-                .desired_width(f32::INFINITY),
-        );
-        let groups: Vec<(Uuid, String)> = self
-            .vault
-            .groups
-            .iter()
-            .map(|g| (g.id, self.vault.group_path(Some(g.id))))
-            .collect();
-        field(ui, "Group", pal);
-        combo_uuid(ui, "host-group", &mut h.group_id, &groups, "(none)");
-        field(ui, "Tags (comma separated)", pal);
-        let mut tags = h.tags.join(", ");
-        if ui
-            .add(
-                TextEdit::singleline(&mut tags)
-                    .hint_text("prod, db")
-                    .desired_width(f32::INFINITY),
-            )
-            .changed()
-        {
-            h.tags = tags
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-        }
-
-        if h.protocol == Protocol::Serial {
-            section_title(ui, "Serial", pal);
-            serial_form(ui, &mut h.serial, pal);
-            if h.address.is_empty() {
-                h.address = h.serial.device.clone();
-            }
-            return;
-        }
-
         let inherited = {
             let mut tmp = h.clone();
             tmp.settings = ConnSettings::default();
             self.vault.resolve(&tmp)
         };
-        section_title(ui, "Connection", pal);
-        ui.horizontal(|ui| {
-            field(ui, "Port", pal);
-            let mut port = h.settings.port.map(|p| p.to_string()).unwrap_or_default();
-            if ui
-                .add(
-                    TextEdit::singleline(&mut port)
-                        .hint_text(inherited.port.to_string())
-                        .desired_width(80.0),
-                )
-                .changed()
-            {
-                h.settings.port = port.trim().parse().ok();
+        let source = if h.group_id.is_some() {
+            self.vault.group_path(h.group_id)
+        } else {
+            "connection defaults".to_string()
+        };
+        let resolved = self.vault.resolve(h);
+        forms::command_line(ui, &equivalent_command(h, &resolved));
+        forms::card(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                forms::label(ui, "Protocol", pal);
+                forms::segmented(
+                    ui,
+                    "protocol",
+                    &mut h.protocol,
+                    &[
+                        (Protocol::Ssh, "SSH"),
+                        (Protocol::Mosh, "Mosh"),
+                        (Protocol::Telnet, "Telnet"),
+                        (Protocol::Serial, "Serial"),
+                    ],
+                );
+            });
+            let wants_user = matches!(h.protocol, Protocol::Ssh | Protocol::Mosh);
+            let address_error = ui
+                .data(|d| d.get_temp::<bool>(address_error_key()).unwrap_or(false))
+                && h.address.trim().is_empty();
+            forms::reveal(
+                ui,
+                egui::Id::unique("address-network"),
+                h.protocol != Protocol::Serial,
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    let default_port = h.protocol.default_port();
+                    let note = if h.settings.port.is_some() {
+                        "Port set on this host".to_string()
+                    } else {
+                        format!("Port {} comes from {source}", inherited.port)
+                    };
+                    forms::label_row(ui, "Address", &note, pal);
+                    let user_hint = if inherited.username.is_empty() {
+                        "user".to_string()
+                    } else {
+                        inherited.username.clone()
+                    };
+                    let port_hint = if h.protocol == Protocol::Ssh {
+                        inherited.port.to_string()
+                    } else {
+                        default_port.to_string()
+                    };
+                    forms::address_line(
+                        ui,
+                        wants_user.then_some(&mut h.settings.username),
+                        &mut h.address,
+                        &mut h.settings.port,
+                        forms::AddressHints {
+                            user: &user_hint,
+                            host: "host or IP",
+                            port: &port_hint,
+                        },
+                        address_error,
+                    );
+                    if address_error {
+                        forms::error_line(ui, "Enter a hostname or IP to connect.", pal);
+                    }
+                },
+            );
+            forms::reveal(
+                ui,
+                egui::Id::unique("address-serial"),
+                h.protocol == Protocol::Serial,
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 12.0;
+                    serial_form(ui, &mut h.serial, pal);
+                    if h.address.is_empty() {
+                        h.address = h.serial.device.clone();
+                    }
+                },
+            );
+            let groups: Vec<(Uuid, String)> = self
+                .vault
+                .groups
+                .iter()
+                .map(|g| (g.id, self.vault.group_path(Some(g.id))))
+                .collect();
+            let label_hint = if h.address.is_empty() {
+                "Name shown in the library".to_string()
+            } else {
+                h.address.clone()
+            };
+            forms::columns(ui, &[1.0, 1.0], |column, ui| {
+                if column == 0 {
+                    forms::Input::new("Label")
+                        .hint(&label_hint)
+                        .show(ui, &mut h.label);
+                } else {
+                    select_uuid(ui, "Group", &mut h.group_id, &groups, "Ungrouped");
+                }
+            });
+            forms::tag_input(ui, "Tags", &mut h.tags);
+        });
+
+        if matches!(h.protocol, Protocol::Ssh | Protocol::Mosh) {
+            self.credentials_section(ui, &mut h.settings, &inherited, &source, pal, "host");
+        }
+        forms::reveal(
+            ui,
+            egui::Id::unique("telnet-signin"),
+            h.protocol == Protocol::Telnet,
+            |ui| {
+                forms::section(ui, "telnet", "Sign-in", "", true, |ui| {
+                    forms::columns(ui, &[1.0, 1.0], |column, ui| {
+                        if column == 0 {
+                            forms::opt_text(
+                                ui,
+                                forms::Input::new("Username").hint(&inherited.username),
+                                &mut h.settings.username,
+                            );
+                        } else {
+                            let mut password = h.settings.password.clone().unwrap_or_default();
+                            if forms::Input::new("Password")
+                                .hint("Ask when connecting")
+                                .password()
+                                .show(ui, &mut password)
+                                .changed()
+                            {
+                                h.settings.password = (!password.is_empty()).then_some(password);
+                            }
+                        }
+                    });
+                    ui.label(
+                        RichText::new(format!(
+                            "{}  Telnet does not encrypt traffic. Use it on a trusted network.",
+                            crate::icons::WARNING
+                        ))
+                        .size(12.0)
+                        .color(pal.warning),
+                    );
+                });
+                ui.add_space(12.0);
+            },
+        );
+        forms::reveal(
+            ui,
+            egui::Id::unique("mosh-section"),
+            h.protocol == Protocol::Mosh,
+            |ui| {
+                forms::section(
+                    ui,
+                    "mosh",
+                    "Mosh",
+                    &h.mosh.server_command.clone(),
+                    false,
+                    |ui| {
+                        forms::Input::new("Server command")
+                            .mono()
+                            .help("Requires mosh-server on the host and mosh-client locally.")
+                            .show(ui, &mut h.mosh.server_command);
+                    },
+                );
+                ui.add_space(12.0);
+            },
+        );
+        if h.protocol != Protocol::Serial {
+            self.advanced_sections(
+                ui,
+                &mut h.settings,
+                &inherited,
+                Some(h.id),
+                &source,
+                pal,
+                "host",
+            );
+        }
+        let first_note = h.notes.lines().next().unwrap_or("").to_string();
+        forms::section(ui, "notes", "Notes", &first_note, false, |ui| {
+            forms::text_area(
+                ui,
+                "",
+                &mut h.notes,
+                3,
+                false,
+                "Anything worth remembering about this host",
+            );
+            if let Some(os) = &h.os {
+                forms::help(ui, &format!("Detected system: {os}"), pal);
             }
         });
-        if matches!(h.protocol, Protocol::Ssh | Protocol::Mosh) {
-            let source = if h.group_id.is_some() {
-                self.vault.group_path(h.group_id)
-            } else {
-                "connection defaults".into()
-            };
-            ui.label(
-                RichText::new(format!("Unset values inherit from {source}."))
-                    .small()
-                    .color(pal.text_dim),
-            );
-            self.credentials_form(ui, &mut h.settings, &inherited, pal, "host");
-        } else {
-            section_title(ui, "Authentication", pal);
-            field(ui, "Username", pal);
-            opt_text(ui, &mut h.settings.username, &inherited.username, false);
-            field(ui, "Password", pal);
-            opt_text(ui, &mut h.settings.password, "Ask when connecting", true);
-            ui.label(
-                RichText::new("Telnet does not encrypt traffic. Use it on a trusted network.")
-                    .small()
-                    .color(pal.warning),
-            );
-        }
-
-        if h.protocol == Protocol::Mosh {
-            section_title(ui, "Mosh", pal);
-            field(ui, "Server command", pal);
-            ui.add(
-                TextEdit::singleline(&mut h.mosh.server_command)
-                    .desired_width(f32::INFINITY)
-                    .font(egui::TextStyle::Monospace),
-            );
-            ui.label(
-                RichText::new("Requires mosh-server on the host and mosh-client locally.")
-                    .small()
-                    .weak(),
-            );
-        }
-
-        egui::CollapsingHeader::new(RichText::new("Advanced").strong())
-            .default_open(false)
-            .show(ui, |ui| {
-                self.advanced_form(ui, &mut h.settings, &inherited, Some(h.id), pal, "host");
-            });
-        section_title(ui, "Notes", pal);
-        ui.add(
-            TextEdit::multiline(&mut h.notes)
-                .desired_rows(3)
-                .desired_width(f32::INFINITY),
-        );
-        if let Some(os) = &h.os {
-            ui.label(
-                RichText::new(format!("Detected OS: {os}"))
-                    .small()
-                    .color(pal.text_dim),
-            );
-        }
     }
 
-    fn credentials_form(
+    fn credentials_section(
         &self,
         ui: &mut egui::Ui,
         s: &mut ConnSettings,
         inherited: &ResolvedTarget,
+        source: &str,
         pal: Palette,
         salt: &str,
     ) {
-        section_title(ui, "Authentication", pal);
-        let identities: Vec<(Uuid, String)> = self
-            .vault
-            .identities
-            .iter()
-            .map(|i| (i.id, format!("{} ({})", i.label, i.username)))
-            .collect();
-        if !identities.is_empty() {
-            field(ui, "Identity", pal);
-            combo_uuid(
-                ui,
-                &format!("{salt}-identity"),
-                &mut s.identity_id,
-                &identities,
-                "(none)",
-            );
+        let key_label = s
+            .key_id
+            .and_then(|id| self.vault.key(id))
+            .or(inherited.key.as_ref())
+            .map(|k| k.label.clone());
+        let mut methods = vec![];
+        if let Some(label) = &key_label {
+            methods.push(format!("Key: {label}"));
         }
-        field(ui, "Username", pal);
-        opt_text(
+        if s.use_agent.unwrap_or(inherited.use_agent) {
+            methods.push("SSH agent".to_string());
+        }
+        if s.password.is_some() || inherited.password.is_some() {
+            methods.push("Password".to_string());
+        }
+        let summary = if methods.is_empty() {
+            "Ask when connecting".to_string()
+        } else {
+            methods.join(", ")
+        };
+        forms::section(
             ui,
-            &mut s.username,
-            if inherited.username.is_empty() {
-                "root"
-            } else {
-                &inherited.username
-            },
-            false,
-        );
-        field(ui, "Password", pal);
-        opt_text(
-            ui,
-            &mut s.password,
-            if inherited.password.is_some() {
-                "•••••• (inherited)"
-            } else {
-                "Leave empty to be asked"
-            },
+            &format!("{salt}-auth"),
+            "Authentication",
+            &summary,
             true,
-        );
-        let keys: Vec<(Uuid, String)> = self
-            .vault
-            .keys
-            .iter()
-            .map(|k| (k.id, format!("{}  ·  {}", k.label, k.key_type)))
-            .collect();
-        field(ui, "SSH key", pal);
-        combo_uuid(ui, &format!("{salt}-key"), &mut s.key_id, &keys, "(none)");
-        tri_toggle(
-            ui,
-            "Use SSH agent (incl. hardware / FIDO2 keys)",
-            &mut s.use_agent,
-            inherited.use_agent,
+            |ui| {
+                let identities: Vec<(Uuid, String)> = self
+                    .vault
+                    .identities
+                    .iter()
+                    .map(|i| (i.id, format!("{} ({})", i.label, i.username)))
+                    .collect();
+                if !identities.is_empty() {
+                    select_uuid(ui, "Identity", &mut s.identity_id, &identities, "None");
+                }
+                // These are views onto settings that can all be on at once, so switching never
+                // erases a saved key or password.
+                let tab_key = ui.scope_id().with("auth-tab");
+                let default_tab = if s.key_id.is_some() {
+                    1
+                } else if s.password.is_some() {
+                    2
+                } else {
+                    0
+                };
+                let mut tab: u8 = ui.data(|d| d.get_temp(tab_key).unwrap_or(default_tab));
+                if forms::segmented(
+                    ui,
+                    "auth-tab",
+                    &mut tab,
+                    &[(0, "Agent"), (1, "Key"), (2, "Password")],
+                ) {
+                    ui.data_mut(|d| d.insert_temp(tab_key, tab));
+                }
+                forms::reveal(ui, tab_key.with(0), tab == 0, |ui| {
+                    forms::inherit_row(
+                        ui,
+                        "Use SSH agent",
+                        "Uses the keys in your agent, including hardware and FIDO2 keys.",
+                        &mut s.use_agent,
+                        inherited.use_agent,
+                        source,
+                    );
+                });
+                forms::reveal(ui, tab_key.with(1), tab == 1, |ui| {
+                    let keys: Vec<(Uuid, String)> = self
+                        .vault
+                        .keys
+                        .iter()
+                        .map(|k| (k.id, format!("{}  ·  {}", k.label, k.key_type)))
+                        .collect();
+                    let none = inherited
+                        .key
+                        .as_ref()
+                        .map(|k| format!("{} (from {source})", k.label))
+                        .unwrap_or_else(|| "None".to_string());
+                    select_uuid(ui, "Key", &mut s.key_id, &keys, &none);
+                });
+                forms::reveal(ui, tab_key.with(2), tab == 2, |ui| {
+                    let mut password = s.password.clone().unwrap_or_default();
+                    let hint = if inherited.password.is_some() {
+                        format!("Inherited from {source}")
+                    } else {
+                        "Stored in your encrypted vault".to_string()
+                    };
+                    if forms::Input::new("Password")
+                        .hint(&hint)
+                        .password()
+                        .show(ui, &mut password)
+                        .changed()
+                    {
+                        s.password = (!password.is_empty()).then_some(password);
+                    }
+                });
+                forms::help(
+                    ui,
+                    "Ferrum tries your key, then the agent, then the password, and asks if none work.",
+                    pal,
+                );
+            },
         );
     }
 
-    fn advanced_form(
+    #[allow(clippy::too_many_arguments)]
+    fn advanced_sections(
         &self,
         ui: &mut egui::Ui,
         s: &mut ConnSettings,
         inherited: &ResolvedTarget,
         self_id: Option<Uuid>,
+        source: &str,
         pal: Palette,
         salt: &str,
     ) {
-        tri_toggle(
+        let route = {
+            let mut parts = vec![];
+            if s.host_chain.is_empty() && inherited.chain.is_empty() {
+                parts.push("Direct".to_string());
+            } else {
+                parts.push(format!(
+                    "Via {}",
+                    plural(s.host_chain.len().max(inherited.chain.len()), "jump host")
+                ));
+            }
+            if let Some(proxy) = s.proxy.as_ref().or(inherited.proxy.as_ref()) {
+                parts.push(
+                    match proxy.kind {
+                        ProxyKind::Socks5 => "SOCKS5",
+                        ProxyKind::Http => "HTTP",
+                        ProxyKind::Command => "ProxyCommand",
+                    }
+                    .to_string(),
+                );
+            }
+            parts.join(", ")
+        };
+        forms::section(
             ui,
-            "Agent forwarding",
-            &mut s.agent_forwarding,
-            inherited.agent_forwarding,
+            &format!("{salt}-route"),
+            "Route and proxy",
+            &route,
+            false,
+            |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    forms::label(ui, "Jump hosts, in order", pal);
+                    let mut remove = None;
+                    let mut up = None;
+                    for (i, id) in s.host_chain.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let name = self
+                                .vault
+                                .host(*id)
+                                .map(|h| h.display_name())
+                                .unwrap_or_else(|| "(missing host)".into());
+                            ui.label(
+                                RichText::new(format!("{}.", i + 1))
+                                    .monospace()
+                                    .color(pal.faint),
+                            );
+                            ui.label(name);
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add(
+                                            forms::Btn::icon(crate::icons::X, "Remove jump host")
+                                                .height(28.0),
+                                        )
+                                        .clicked()
+                                    {
+                                        remove = Some(i);
+                                    }
+                                    if i > 0
+                                        && ui
+                                            .add(
+                                                forms::Btn::icon(crate::icons::ARROW_UP, "Move up")
+                                                    .height(28.0),
+                                            )
+                                            .clicked()
+                                    {
+                                        up = Some(i);
+                                    }
+                                },
+                            );
+                        });
+                    }
+                    if let Some(i) = remove {
+                        s.host_chain.remove(i);
+                    }
+                    if let Some(i) = up {
+                        s.host_chain.swap(i, i - 1);
+                    }
+                    let width = ui.available_width();
+                    forms::select(
+                        ui,
+                        &format!("{salt}-chain-add"),
+                        width,
+                        if s.host_chain.is_empty() {
+                            "Connect directly"
+                        } else {
+                            "Add another jump host"
+                        },
+                        false,
+                        |ui| {
+                            let mut any = false;
+                            for h in &self.vault.hosts {
+                                if Some(h.id) != self_id
+                                    && !s.host_chain.contains(&h.id)
+                                    && h.protocol == Protocol::Ssh
+                                {
+                                    any = true;
+                                    if forms::option(ui, false, &h.display_name()).clicked() {
+                                        s.host_chain.push(h.id);
+                                        ui.close();
+                                    }
+                                }
+                            }
+                            if !any {
+                                ui.label(RichText::new("No other SSH hosts").color(pal.text_dim));
+                            }
+                        },
+                    );
+                });
+                // Proxy
+                let mut kind = s.proxy.as_ref().map(|p| p.kind);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    forms::label(ui, "Proxy", pal);
+                    if forms::segmented(
+                        ui,
+                        &format!("{salt}-proxy"),
+                        &mut kind,
+                        &[
+                            (None, "None"),
+                            (Some(ProxyKind::Socks5), "SOCKS5"),
+                            (Some(ProxyKind::Http), "HTTP"),
+                            (Some(ProxyKind::Command), "Command"),
+                        ],
+                    ) {
+                        match kind {
+                            None => s.proxy = None,
+                            Some(kind) => {
+                                s.proxy
+                                    .get_or_insert_with(|| ProxyConfig {
+                                        port: 1080,
+                                        ..Default::default()
+                                    })
+                                    .kind = kind;
+                            }
+                        }
+                    }
+                });
+                let open = s.proxy.is_some();
+                forms::reveal(ui, ui.scope_id().with((salt, "proxy-fields")), open, |ui| {
+                    ui.spacing_mut().item_spacing.y = 12.0;
+                    let Some(p) = s.proxy.as_mut() else {
+                        return;
+                    };
+                    if p.kind == ProxyKind::Command {
+                        forms::Input::new("Command")
+                            .hint("nc -X 5 -x proxy:1080 %h %p")
+                            .mono()
+                            .show(ui, &mut p.command);
+                    } else {
+                        forms::columns(ui, &[3.0, 1.0], |column, ui| {
+                            if column == 0 {
+                                forms::Input::new("Proxy host")
+                                    .hint("127.0.0.1")
+                                    .mono()
+                                    .show(ui, &mut p.host);
+                            } else {
+                                forms::number(ui, forms::Input::new("Port"), &mut p.port);
+                            }
+                        });
+                        forms::columns(ui, &[1.0, 1.0], |column, ui| {
+                            if column == 0 {
+                                forms::Input::new("Proxy user")
+                                    .hint("Optional")
+                                    .show(ui, &mut p.username);
+                            } else {
+                                forms::Input::new("Proxy password")
+                                    .hint("Optional")
+                                    .password()
+                                    .show(ui, &mut p.password);
+                            }
+                        });
+                    }
+                });
+            },
         );
-        tri_toggle(
+        let behavior = format!(
+            "{} s timeout, {}",
+            s.connect_timeout_secs
+                .unwrap_or(inherited.connect_timeout_secs),
+            if s.strict_host_key_check
+                .unwrap_or(inherited.strict_host_key_check)
+            {
+                "strict host keys"
+            } else {
+                "host keys not enforced"
+            }
+        );
+        forms::section(
             ui,
-            "Strict host key checking (refuse untrusted hosts)",
-            &mut s.strict_host_key_check,
-            inherited.strict_host_key_check,
-        );
-        // Host chain / jump hosts.
-        field(ui, "Host chain (jump hosts, in order)", pal);
-        let mut remove = None;
-        let mut up = None;
-        for (i, id) in s.host_chain.iter().enumerate() {
-            ui.horizontal(|ui| {
-                let name = self
+            &format!("{salt}-behavior"),
+            "Behavior",
+            &behavior,
+            false,
+            |ui| {
+                forms::columns(ui, &[1.0, 1.0], |column, ui| {
+                    let from = format!("Inherited from {source}");
+                    if column == 0 {
+                        let hint = inherited.connect_timeout_secs.to_string();
+                        let mut input = forms::Input::new("Connect timeout")
+                            .hint(&hint)
+                            .suffix("sec");
+                        if s.connect_timeout_secs.is_none() {
+                            input = input.help(&from);
+                        }
+                        forms::opt_number(ui, input, &mut s.connect_timeout_secs);
+                    } else {
+                        let hint = inherited.keepalive_secs.to_string();
+                        let mut input = forms::Input::new("Keep-alive").hint(&hint).suffix("sec");
+                        if s.keepalive_secs.is_none() {
+                            input = input.help(&from);
+                        }
+                        forms::opt_number(ui, input, &mut s.keepalive_secs);
+                    }
+                });
+                forms::inherit_row(
+                    ui,
+                    "Strict host key checking",
+                    "Refuse hosts you have not trusted yet.",
+                    &mut s.strict_host_key_check,
+                    inherited.strict_host_key_check,
+                    source,
+                );
+                forms::inherit_row(
+                    ui,
+                    "Forward SSH agent",
+                    "Only enable this on servers you trust.",
+                    &mut s.agent_forwarding,
+                    inherited.agent_forwarding,
+                    source,
+                );
+                let snippets: Vec<(Uuid, String)> = self
                     .vault
-                    .host(*id)
-                    .map(|h| h.display_name())
-                    .unwrap_or_else(|| "(missing host)".into());
-                ui.label(format!("{}. {name}", i + 1));
-                if i > 0 && ui.small_button("↑").clicked() {
-                    up = Some(i);
-                }
-                if ui.small_button("×").clicked() {
-                    remove = Some(i);
-                }
-            });
-        }
-        if let Some(i) = remove {
-            s.host_chain.remove(i);
-        }
-        if let Some(i) = up {
-            s.host_chain.swap(i, i - 1);
-        }
-        egui::ComboBox::from_id_salt(format!("{salt}-chain-add"))
-            .selected_text("+ Add jump host")
-            .show_ui(ui, |ui| {
-                for h in &self.vault.hosts {
-                    if Some(h.id) != self_id
-                        && !s.host_chain.contains(&h.id)
-                        && h.protocol == Protocol::Ssh
-                    {
-                        if ui.selectable_label(false, h.display_name()).clicked() {
-                            s.host_chain.push(h.id);
-                        }
-                    }
-                }
-            });
-
-        // Proxy
-        field(ui, "Proxy", pal);
-        let mut use_proxy = s.proxy.is_some();
-        if ui
-            .checkbox(&mut use_proxy, "Connect through a proxy")
-            .changed()
-        {
-            s.proxy = if use_proxy {
-                Some(ProxyConfig {
-                    port: 1080,
-                    ..Default::default()
-                })
-            } else {
-                None
-            };
-        }
-        if let Some(p) = s.proxy.as_mut() {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut p.kind, ProxyKind::Socks5, "SOCKS5");
-                ui.selectable_value(&mut p.kind, ProxyKind::Http, "HTTP CONNECT");
-                ui.selectable_value(&mut p.kind, ProxyKind::Command, "ProxyCommand");
-            });
-            if p.kind == ProxyKind::Command {
-                ui.add(
-                    TextEdit::singleline(&mut p.command)
-                        .hint_text("nc -X 5 -x proxy:1080 %h %p")
-                        .desired_width(f32::INFINITY),
+                    .snippets
+                    .iter()
+                    .map(|s| (s.id, s.name.clone()))
+                    .collect();
+                select_uuid(
+                    ui,
+                    "Startup snippet, runs after sign-in",
+                    &mut s.startup_snippet_id,
+                    &snippets,
+                    "None",
                 );
-            } else {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        TextEdit::singleline(&mut p.host)
-                            .hint_text("proxy host")
-                            .desired_width(180.0),
-                    );
-                    let mut port = p.port.to_string();
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 6.0;
+                    forms::label(ui, "Environment variables", pal);
+                    let mut rm = None;
+                    for (i, (k, v)) in s.env.iter_mut().enumerate() {
+                        ui.push_id(i, |ui| {
+                            ui.horizontal(|ui| {
+                                let width = (ui.available_width() - 48.0) / 2.0;
+                                forms::Input::bare("Variable name")
+                                    .hint("NAME")
+                                    .mono()
+                                    .width(width)
+                                    .show(ui, k);
+                                forms::Input::bare("Variable value")
+                                    .hint("value")
+                                    .mono()
+                                    .width(width)
+                                    .show(ui, v);
+                                if ui
+                                    .add(forms::Btn::icon(crate::icons::X, "Remove variable"))
+                                    .clicked()
+                                {
+                                    rm = Some(i);
+                                }
+                            });
+                        });
+                    }
+                    if let Some(i) = rm {
+                        s.env.remove(i);
+                    }
                     if ui
-                        .add(TextEdit::singleline(&mut port).desired_width(60.0))
-                        .changed()
-                    {
-                        p.port = port.parse().unwrap_or(p.port);
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.add(
-                        TextEdit::singleline(&mut p.username)
-                            .hint_text("user (optional)")
-                            .desired_width(120.0),
-                    );
-                    super::password_input(ui, &mut p.password, "password", 120.0);
-                });
-            }
-        }
-
-        // Startup snippet
-        let snippets: Vec<(Uuid, String)> = self
-            .vault
-            .snippets
-            .iter()
-            .map(|s| (s.id, s.name.clone()))
-            .collect();
-        field(ui, "Startup snippet (runs after login)", pal);
-        combo_uuid(
-            ui,
-            &format!("{salt}-startup"),
-            &mut s.startup_snippet_id,
-            &snippets,
-            "(none)",
-        );
-
-        // Environment variables
-        field(ui, "Environment variables", pal);
-        let mut rm = None;
-        for (i, (k, v)) in s.env.iter_mut().enumerate() {
-            ui.horizontal(|ui| {
-                ui.add(
-                    TextEdit::singleline(k)
-                        .hint_text("NAME")
-                        .desired_width(110.0),
-                );
-                ui.add(
-                    TextEdit::singleline(v)
-                        .hint_text("value")
-                        .desired_width(150.0),
-                );
-                if ui.small_button("×").clicked() {
-                    rm = Some(i);
-                }
-            });
-        }
-        if let Some(i) = rm {
-            s.env.remove(i);
-        }
-        if ui.small_button("+ Add variable").clicked() {
-            s.env.push((String::new(), String::new()));
-        }
-
-        ui.horizontal(|ui| {
-            field(ui, "Keep-alive (s)", pal);
-            let mut ka = s.keepalive_secs.map(|k| k.to_string()).unwrap_or_default();
-            if ui
-                .add(
-                    TextEdit::singleline(&mut ka)
-                        .hint_text(inherited.keepalive_secs.to_string())
-                        .desired_width(60.0),
-                )
-                .changed()
-            {
-                s.keepalive_secs = ka.trim().parse().ok();
-            }
-        });
-        ui.horizontal(|ui| {
-            field(ui, "Connect timeout (s)", pal);
-            let mut ct = s
-                .connect_timeout_secs
-                .map(|k| k.to_string())
-                .unwrap_or_default();
-            if ui
-                .add(
-                    TextEdit::singleline(&mut ct)
-                        .hint_text(inherited.connect_timeout_secs.to_string())
-                        .desired_width(60.0),
-                )
-                .changed()
-            {
-                s.connect_timeout_secs = ct.trim().parse().ok();
-            }
-        });
-        ui.horizontal(|ui| {
-            field(ui, "Charset", pal);
-            let cur = s
-                .charset
-                .clone()
-                .unwrap_or_else(|| inherited.charset.clone());
-            egui::ComboBox::from_id_salt(format!("{salt}-charset"))
-                .selected_text(cur)
-                .show_ui(ui, |ui| {
-                    for c in crate::term::CHARSETS {
-                        if ui
-                            .selectable_label(s.charset.as_deref() == Some(*c), *c)
-                            .clicked()
-                        {
-                            s.charset = Some(c.to_string());
-                        }
-                    }
-                });
-        });
-        ui.horizontal(|ui| {
-            field(ui, "Backspace sends", pal);
-            let mut b = s.backspace.unwrap_or(inherited.backspace);
-            if ui
-                .selectable_value(&mut b, BackspaceMode::Del, "DEL (^?)")
-                .changed()
-                || ui
-                    .selectable_value(&mut b, BackspaceMode::CtrlH, "^H")
-                    .changed()
-            {
-                s.backspace = Some(b);
-            }
-        });
-        ui.horizontal(|ui| {
-            field(ui, "Color scheme", pal);
-            let cur = s.color_scheme.clone().unwrap_or_else(|| "(default)".into());
-            egui::ComboBox::from_id_salt(format!("{salt}-scheme"))
-                .selected_text(cur)
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(s.color_scheme.is_none(), "(default)")
+                        .add(
+                            forms::Btn::ghost(format!("{}  Add variable", crate::icons::PLUS))
+                                .small(),
+                        )
                         .clicked()
                     {
-                        s.color_scheme = None;
-                    }
-                    for sc in crate::themes::schemes() {
-                        if ui
-                            .selectable_label(s.color_scheme.as_deref() == Some(sc.name), sc.name)
-                            .clicked()
-                        {
-                            s.color_scheme = Some(sc.name.to_string());
-                        }
+                        s.env.push((String::new(), String::new()));
                     }
                 });
-        });
-        ui.horizontal(|ui| {
-            field(ui, "Font size", pal);
-            let mut fs = s.font_size.map(|f| f.to_string()).unwrap_or_default();
-            if ui
-                .add(
-                    TextEdit::singleline(&mut fs)
-                        .hint_text("default")
-                        .desired_width(60.0),
-                )
-                .changed()
-            {
-                s.font_size = fs.trim().parse().ok();
-            }
-        });
+            },
+        );
+        let terminal = s
+            .color_scheme
+            .clone()
+            .unwrap_or_else(|| "Default colors".to_string());
+        forms::section(
+            ui,
+            &format!("{salt}-terminal"),
+            "Terminal",
+            &terminal,
+            false,
+            |ui| {
+                forms::columns(ui, &[1.0, 1.0], |column, ui| {
+                    if column == 0 {
+                        let mut options: Vec<(Option<String>, String)> =
+                            vec![(None, format!("Use {}", inherited.charset))];
+                        options.extend(
+                            crate::term::CHARSETS
+                                .iter()
+                                .map(|c| (Some(c.to_string()), c.to_string())),
+                        );
+                        forms::select_field(ui, "Charset", &mut s.charset, &options);
+                    } else {
+                        let mut options: Vec<(Option<String>, String)> =
+                            vec![(None, "Default colors".to_string())];
+                        options.extend(
+                            crate::themes::schemes()
+                                .iter()
+                                .map(|sc| (Some(sc.name.to_string()), sc.name.to_string())),
+                        );
+                        forms::select_field(ui, "Color scheme", &mut s.color_scheme, &options);
+                    }
+                });
+                forms::columns(ui, &[1.0, 1.0], |column, ui| {
+                    if column == 0 {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 6.0;
+                            forms::label(ui, "Backspace sends", pal);
+                            let mut mode = s.backspace.unwrap_or(inherited.backspace);
+                            if forms::segmented(
+                                ui,
+                                &format!("{salt}-backspace"),
+                                &mut mode,
+                                &[(BackspaceMode::Del, "DEL ^?"), (BackspaceMode::CtrlH, "^H")],
+                            ) {
+                                s.backspace = Some(mode);
+                            }
+                        });
+                    } else {
+                        forms::opt_number(
+                            ui,
+                            forms::Input::new("Font size").hint("Default"),
+                            &mut s.font_size,
+                        );
+                    }
+                });
+            },
+        );
     }
 
     fn group_form(&mut self, ui: &mut egui::Ui, g: &mut Group, pal: Palette) {
-        section_title(ui, "Group", pal);
-        field(ui, "Name", pal);
-        ui.add(
-            TextEdit::singleline(&mut g.name)
-                .hint_text("Production")
-                .desired_width(f32::INFINITY),
-        );
         let gid = g.id;
         let parents: Vec<(Uuid, String)> = self
             .vault
@@ -857,262 +1193,309 @@ impl App {
             })
             .map(|x| (x.id, self.vault.group_path(Some(x.id))))
             .collect();
-        field(ui, "Parent group", pal);
-        combo_uuid(
-            ui,
-            "group-parent",
-            &mut g.parent_id,
-            &parents,
-            "(top level)",
-        );
-        ui.label(
-            RichText::new("Settings below are inherited by every host in this group unless the host overrides them.")
-                .small()
-                .color(pal.text_dim),
-        );
         let fake = Host {
             group_id: g.parent_id,
             ..Default::default()
         };
         let inherited = self.vault.resolve(&fake);
-        ui.horizontal(|ui| {
-            field(ui, "Port", pal);
-            let mut port = g.settings.port.map(|p| p.to_string()).unwrap_or_default();
-            if ui
-                .add(
-                    TextEdit::singleline(&mut port)
-                        .hint_text("22")
-                        .desired_width(80.0),
-                )
-                .changed()
-            {
-                g.settings.port = port.trim().parse().ok();
-            }
+        let source = if g.parent_id.is_some() {
+            self.vault.group_path(g.parent_id)
+        } else {
+            "connection defaults".to_string()
+        };
+        forms::card(ui, |ui| {
+            forms::columns(ui, &[1.0, 1.0], |column, ui| {
+                if column == 0 {
+                    forms::Input::new("Name")
+                        .hint("Production")
+                        .show(ui, &mut g.name);
+                } else {
+                    select_uuid(ui, "Parent group", &mut g.parent_id, &parents, "Top level");
+                }
+            });
+            forms::opt_number(
+                ui,
+                forms::Input::new("Port").hint("22").width(120.0),
+                &mut g.settings.port,
+            );
+            forms::opt_text(
+                ui,
+                forms::Input::new("Username").hint(if inherited.username.is_empty() {
+                    "root"
+                } else {
+                    &inherited.username
+                }),
+                &mut g.settings.username,
+            );
+            forms::help(
+                ui,
+                "Hosts in this group inherit these settings unless they set their own.",
+                pal,
+            );
         });
-        self.credentials_form(ui, &mut g.settings, &inherited, pal, "group");
-        egui::CollapsingHeader::new(RichText::new("Advanced").strong()).show(ui, |ui| {
-            self.advanced_form(ui, &mut g.settings, &inherited, None, pal, "group");
-        });
+        self.credentials_section(ui, &mut g.settings, &inherited, &source, pal, "group");
+        self.advanced_sections(ui, &mut g.settings, &inherited, None, &source, pal, "group");
     }
 
     fn identity_form(&mut self, ui: &mut egui::Ui, i: &mut Identity, pal: Palette) {
-        section_title(ui, "Identity", pal);
-        ui.label(
-            RichText::new("Reusable username + password/key bundle you can attach to many hosts.")
-                .small()
-                .color(pal.text_dim),
-        );
-        field(ui, "Label", pal);
-        ui.add(TextEdit::singleline(&mut i.label).desired_width(f32::INFINITY));
-        field(ui, "Username", pal);
-        ui.add(TextEdit::singleline(&mut i.username).desired_width(f32::INFINITY));
-        field(ui, "Password", pal);
-        super::password_input(ui, &mut i.password, "", f32::INFINITY);
-        let keys: Vec<(Uuid, String)> = self
-            .vault
-            .keys
-            .iter()
-            .map(|k| (k.id, k.label.clone()))
-            .collect();
-        field(ui, "Key", pal);
-        combo_uuid(ui, "identity-key", &mut i.key_id, &keys, "(none)");
+        forms::card(ui, |ui| {
+            forms::help(
+                ui,
+                "A reusable username with a password or key that many hosts can share.",
+                pal,
+            );
+            forms::columns(ui, &[1.0, 1.0], |column, ui| {
+                if column == 0 {
+                    forms::Input::new("Label").show(ui, &mut i.label);
+                } else {
+                    forms::Input::new("Username")
+                        .mono()
+                        .show(ui, &mut i.username);
+                }
+            });
+            forms::Input::new("Password")
+                .password()
+                .show(ui, &mut i.password);
+            let keys: Vec<(Uuid, String)> = self
+                .vault
+                .keys
+                .iter()
+                .map(|k| (k.id, k.label.clone()))
+                .collect();
+            select_uuid(ui, "Key", &mut i.key_id, &keys, "None");
+        });
     }
 
     fn key_form(&mut self, ui: &mut egui::Ui, k: &mut SshKey, is_new: bool, pal: Palette) {
-        section_title(ui, "Key", pal);
-        field(ui, "Label", pal);
-        ui.add(TextEdit::singleline(&mut k.label).desired_width(f32::INFINITY));
-        if !k.key_type.is_empty() {
-            ui.label(
-                RichText::new(format!("Type: {}", k.key_type))
-                    .small()
-                    .color(pal.text_dim),
-            );
-        }
-        if !k.public_key.is_empty() {
-            ui.label(
-                RichText::new(format!(
-                    "Fingerprint: {}",
-                    crate::keys::fingerprint_of_public(&k.public_key)
-                ))
-                .small()
-                .monospace()
-                .color(pal.text_dim),
-            );
-        }
-        field(ui, "Public key", pal);
-        ui.add(
-            TextEdit::multiline(&mut k.public_key)
-                .desired_rows(2)
-                .font(egui::TextStyle::Monospace)
-                .desired_width(f32::INFINITY),
-        );
-        ui.horizontal(|ui| {
-            if ui.button("\u{E198} Copy public key").clicked() {
-                ui.ctx().copy_text(k.public_key.clone());
-            }
-            if !is_new && ui.button("\u{E08E} Install on host…").clicked() {
-                self.dialog = Some(Dialog::InstallKey {
-                    key_id: k.id,
-                    host_id: None,
-                    busy: false,
+        forms::card(ui, |ui| {
+            forms::Input::new("Label").show(ui, &mut k.label);
+            if !k.key_type.is_empty() || !k.public_key.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    if !k.key_type.is_empty() {
+                        forms::chip(ui, &k.key_type, true, pal);
+                    }
+                    if !k.public_key.is_empty() {
+                        ui.label(
+                            RichText::new(crate::keys::fingerprint_of_public(&k.public_key))
+                                .monospace()
+                                .size(12.0)
+                                .color(pal.text_dim),
+                        );
+                    }
                 });
             }
+            forms::text_area(ui, "Public key", &mut k.public_key, 2, true, "");
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        forms::Btn::secondary(format!("{}  Copy public key", crate::icons::COPY))
+                            .small(),
+                    )
+                    .clicked()
+                {
+                    ui.ctx().copy_text(k.public_key.clone());
+                }
+                if !is_new
+                    && ui
+                        .add(
+                            forms::Btn::secondary(format!(
+                                "{}  Install on host…",
+                                crate::icons::ARROW_UP
+                            ))
+                            .small(),
+                        )
+                        .clicked()
+                {
+                    self.dialog = Some(Dialog::InstallKey {
+                        key_id: k.id,
+                        host_id: None,
+                        busy: false,
+                    });
+                }
+            });
         });
-        field(ui, "Private key", pal);
         let id = ui.make_persistent_id(("show-priv", k.id));
         let mut show = ui.data_mut(|d| *d.get_temp_mut_or(id, is_new));
-        if ui.checkbox(&mut show, "Show private key").changed() {
-            ui.data_mut(|d| d.insert_temp(id, show));
-        }
-        if show {
-            let r = ui.add(
-                TextEdit::multiline(&mut k.private_key)
-                    .desired_rows(6)
-                    .font(egui::TextStyle::Monospace)
-                    .hint_text("-----BEGIN OPENSSH PRIVATE KEY-----")
-                    .desired_width(f32::INFINITY),
-            );
-            if r.changed() {
-                if let Ok(parsed) = crate::keys::import(&k.label, &k.private_key, &k.passphrase) {
-                    k.public_key = parsed.public_key;
-                    k.key_type = parsed.key_type;
+        forms::section(
+            ui,
+            "private",
+            "Private key",
+            "Stored encrypted in your vault",
+            is_new,
+            |ui| {
+                if forms::switch_row(ui, "Show private key", "", &mut show).changed() {
+                    ui.data_mut(|d| d.insert_temp(id, show));
                 }
-            }
-        }
-        field(ui, "Passphrase", pal);
-        super::password_input(ui, &mut k.passphrase, "optional", f32::INFINITY);
-        field(ui, "OpenSSH certificate (optional)", pal);
-        ui.add(
-            TextEdit::multiline(&mut k.certificate)
-                .desired_rows(2)
-                .font(egui::TextStyle::Monospace)
-                .hint_text("ssh-ed25519-cert-v01@openssh.com AAAA…")
-                .desired_width(f32::INFINITY),
-        );
-        ui.horizontal(|ui| {
-            if ui.button("\u{E248} Export private…").clicked() {
-                if let Some(p) = rfd::FileDialog::new()
-                    .set_file_name("id_ferrum")
-                    .save_file()
-                {
-                    let r = std::fs::write(&p, &k.private_key);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let _ =
-                            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+                forms::reveal(ui, id.with("body"), show, |ui| {
+                    let r = forms::text_area(
+                        ui,
+                        "",
+                        &mut k.private_key,
+                        6,
+                        true,
+                        "-----BEGIN OPENSSH PRIVATE KEY-----",
+                    );
+                    if r.changed() {
+                        if let Ok(parsed) =
+                            crate::keys::import(&k.label, &k.private_key, &k.passphrase)
+                        {
+                            k.public_key = parsed.public_key;
+                            k.key_type = parsed.key_type;
+                        }
                     }
-                    self.toast(
-                        if r.is_ok() {
-                            "Private key exported"
-                        } else {
-                            "Export failed"
-                        },
-                        r.is_err(),
-                    );
-                }
-            }
-            if ui.button("\u{E248} Export public…").clicked() {
-                if let Some(p) = rfd::FileDialog::new()
-                    .set_file_name("id_ferrum.pub")
-                    .save_file()
-                {
-                    let r = std::fs::write(&p, format!("{}\n", k.public_key.trim()));
-                    self.toast(
-                        if r.is_ok() {
-                            "Public key exported"
-                        } else {
-                            "Export failed"
-                        },
-                        r.is_err(),
-                    );
-                }
-            }
-        });
+                });
+                forms::Input::new("Passphrase")
+                    .hint("Optional")
+                    .password()
+                    .show(ui, &mut k.passphrase);
+                forms::text_area(
+                    ui,
+                    "OpenSSH certificate, optional",
+                    &mut k.certificate,
+                    2,
+                    true,
+                    "ssh-ed25519-cert-v01@openssh.com AAAA…",
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            forms::Btn::secondary(format!(
+                                "{}  Export private…",
+                                crate::icons::FLOPPY_DISK
+                            ))
+                            .small(),
+                        )
+                        .clicked()
+                    {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .set_file_name("id_ferrum")
+                            .save_file()
+                        {
+                            let r = std::fs::write(&p, &k.private_key);
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = std::fs::set_permissions(
+                                    &p,
+                                    std::fs::Permissions::from_mode(0o600),
+                                );
+                            }
+                            self.toast(
+                                if r.is_ok() {
+                                    "Private key exported"
+                                } else {
+                                    "Export failed"
+                                },
+                                r.is_err(),
+                            );
+                        }
+                    }
+                    if ui
+                        .add(
+                            forms::Btn::secondary(format!(
+                                "{}  Export public…",
+                                crate::icons::FLOPPY_DISK
+                            ))
+                            .small(),
+                        )
+                        .clicked()
+                    {
+                        if let Some(p) = rfd::FileDialog::new()
+                            .set_file_name("id_ferrum.pub")
+                            .save_file()
+                        {
+                            let r = std::fs::write(&p, format!("{}\n", k.public_key.trim()));
+                            self.toast(
+                                if r.is_ok() {
+                                    "Public key exported"
+                                } else {
+                                    "Export failed"
+                                },
+                                r.is_err(),
+                            );
+                        }
+                    }
+                });
+            },
+        );
     }
 
     fn forward_form(&mut self, ui: &mut egui::Ui, f: &mut PortForward, pal: Palette) {
-        section_title(ui, "Rule", pal);
-        field(ui, "Label", pal);
-        ui.add(
-            TextEdit::singleline(&mut f.label)
-                .hint_text("Postgres tunnel")
-                .desired_width(f32::INFINITY),
-        );
-        ui.horizontal(|ui| {
-            for k in [
-                ForwardKind::Local,
-                ForwardKind::Remote,
-                ForwardKind::Dynamic,
-            ] {
-                ui.selectable_value(&mut f.kind, k, k.label());
-            }
-        });
-        ui.label(
-            RichText::new(match f.kind {
-                ForwardKind::Local => "Local: connections to bind address on this machine are forwarded through the host to the destination.",
-                ForwardKind::Remote => "Remote: connections to bind address on the remote host come back to the destination reachable from this machine.",
-                ForwardKind::Dynamic => "Dynamic: a local SOCKS4/5 proxy that routes any destination through the host.",
-            })
-            .small()
-            .color(pal.text_dim),
-        );
-        let hosts: Vec<(Uuid, String)> = self
-            .vault
-            .hosts
-            .iter()
-            .filter(|h| h.protocol == Protocol::Ssh)
-            .map(|h| (h.id, h.display_name()))
-            .collect();
-        field(ui, "Through host", pal);
-        combo_uuid(ui, "fw-host", &mut f.host_id, &hosts, "(choose host)");
-        ui.horizontal(|ui| {
+        forms::card(ui, |ui| {
+            forms::Input::new("Label")
+                .hint("Postgres tunnel")
+                .show(ui, &mut f.label);
             ui.vertical(|ui| {
-                field(
+                ui.spacing_mut().item_spacing.y = 6.0;
+                forms::label(ui, "Direction", pal);
+                forms::segmented(
                     ui,
-                    if f.kind == ForwardKind::Remote {
-                        "Remote bind address"
-                    } else {
-                        "Bind address"
+                    "forward-kind",
+                    &mut f.kind,
+                    &[
+                        (ForwardKind::Local, "Local"),
+                        (ForwardKind::Remote, "Remote"),
+                        (ForwardKind::Dynamic, "Dynamic"),
+                    ],
+                );
+                forms::help(
+                    ui,
+                    match f.kind {
+                        ForwardKind::Local => "Connections to the bind address on this machine go through the host to the destination.",
+                        ForwardKind::Remote => "Connections to the bind address on the host come back to a destination this machine can reach.",
+                        ForwardKind::Dynamic => "A local SOCKS4/5 proxy that routes any destination through the host.",
                     },
                     pal,
                 );
-                ui.add(TextEdit::singleline(&mut f.bind_address).desired_width(150.0));
             });
-            ui.vertical(|ui| {
-                field(ui, "Port", pal);
-                let mut p = f.bind_port.to_string();
-                if ui
-                    .add(TextEdit::singleline(&mut p).desired_width(70.0))
-                    .changed()
-                {
-                    f.bind_port = p.parse().unwrap_or(f.bind_port);
+            let hosts: Vec<(Uuid, String)> = self
+                .vault
+                .hosts
+                .iter()
+                .filter(|h| h.protocol == Protocol::Ssh)
+                .map(|h| (h.id, h.display_name()))
+                .collect();
+            select_uuid(ui, "Through host", &mut f.host_id, &hosts, "Choose a host");
+            forms::columns(ui, &[3.0, 1.0], |column, ui| {
+                if column == 0 {
+                    forms::Input::new(if f.kind == ForwardKind::Remote {
+                        "Remote bind address"
+                    } else {
+                        "Bind address"
+                    })
+                    .mono()
+                    .show(ui, &mut f.bind_address);
+                } else {
+                    forms::number(ui, forms::Input::new("Port").salt("bind"), &mut f.bind_port);
                 }
             });
+            forms::reveal(
+                ui,
+                egui::Id::unique("forward-destination"),
+                f.kind != ForwardKind::Dynamic,
+                |ui| {
+                    forms::columns(ui, &[3.0, 1.0], |column, ui| {
+                        if column == 0 {
+                            forms::Input::new("Destination host")
+                                .mono()
+                                .show(ui, &mut f.dest_host);
+                        } else {
+                            forms::number(
+                                ui,
+                                forms::Input::new("Port").salt("destination"),
+                                &mut f.dest_port,
+                            );
+                        }
+                    });
+                },
+            );
+            forms::switch_row(
+                ui,
+                "Start automatically",
+                "Opens this tunnel whenever you connect to the host.",
+                &mut f.auto_start,
+            );
         });
-        if f.kind != ForwardKind::Dynamic {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    field(ui, "Destination host", pal);
-                    ui.add(TextEdit::singleline(&mut f.dest_host).desired_width(150.0));
-                });
-                ui.vertical(|ui| {
-                    field(ui, "Port", pal);
-                    let mut p = f.dest_port.to_string();
-                    if ui
-                        .add(TextEdit::singleline(&mut p).desired_width(70.0))
-                        .changed()
-                    {
-                        f.dest_port = p.parse().unwrap_or(f.dest_port);
-                    }
-                });
-            });
-        }
-        ui.checkbox(
-            &mut f.auto_start,
-            "Start automatically when connecting to this host",
-        );
     }
 
     fn hotkey_field(&mut self, ui: &mut egui::Ui, s: &mut Snippet, pal: Palette) {
@@ -1147,12 +1530,12 @@ impl App {
             } else if s.hotkey.is_empty() {
                 "Record shortcut".to_string()
             } else {
-                format!("\u{E2D8}  {}", s.hotkey)
+                format!("{}  {}", crate::icons::KEYBOARD, s.hotkey)
             };
-            if ui.button(label).clicked() {
+            if ui.add(forms::Btn::secondary(label)).clicked() {
                 recording = !recording;
             }
-            if !s.hotkey.is_empty() && ui.small_button("Clear").clicked() {
+            if !s.hotkey.is_empty() && ui.add(forms::Btn::ghost("Clear").small()).clicked() {
                 s.hotkey.clear();
             }
         });
@@ -1162,7 +1545,7 @@ impl App {
         }
         if let Some((m, k)) = crate::hotkeys::parse(&s.hotkey) {
             if crate::hotkeys::is_reserved(m, k) {
-                ui.colored_label(pal.danger, "Ferrum already uses this shortcut");
+                forms::error_line(ui, "Ferrum already uses this shortcut", pal);
             } else if self
                 .vault
                 .snippets
@@ -1175,140 +1558,251 @@ impl App {
     }
 
     fn snippet_form(&mut self, ui: &mut egui::Ui, s: &mut Snippet, pal: Palette) {
-        section_title(ui, "Snippet", pal);
-        field(ui, "Name", pal);
-        ui.add(TextEdit::singleline(&mut s.name).desired_width(f32::INFINITY));
-        field(ui, "Package (folder)", pal);
-        ui.horizontal(|ui| {
-            ui.add(
-                TextEdit::singleline(&mut s.package)
-                    .hint_text("e.g. Docker, Deploy")
-                    .desired_width(180.0),
-            );
-            let mut known: Vec<String> = self
-                .vault
-                .snippets
-                .iter()
-                .map(|x| x.package.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .collect();
-            known.sort();
-            known.dedup();
-            if !known.is_empty() {
-                egui::ComboBox::from_id_salt("snippet-package")
-                    .selected_text("existing…")
-                    .show_ui(ui, |ui| {
-                        for p in known {
-                            if ui.selectable_label(s.package == p, &p).clicked() {
-                                s.package = p;
-                            }
+        forms::card(ui, |ui| {
+            forms::columns(ui, &[1.0, 1.0], |column, ui| {
+                if column == 0 {
+                    forms::Input::new("Name").show(ui, &mut s.name);
+                } else {
+                    let mut known: Vec<String> = self
+                        .vault
+                        .snippets
+                        .iter()
+                        .map(|x| x.package.trim().to_string())
+                        .filter(|p| !p.is_empty())
+                        .collect();
+                    known.sort();
+                    known.dedup();
+                    ui.horizontal_top(|ui| {
+                        let width = if known.is_empty() {
+                            ui.available_width()
+                        } else {
+                            ui.available_width() - 44.0
+                        };
+                        forms::Input::new("Package")
+                            .hint("Docker, Deploy")
+                            .width(width)
+                            .show(ui, &mut s.package);
+                        if !known.is_empty() {
+                            ui.vertical(|ui| {
+                                ui.add_space(22.0);
+                                let shown = "";
+                                forms::select(ui, "snippet-package", 36.0, shown, false, |ui| {
+                                    ui.set_min_width(180.0);
+                                    for p in &known {
+                                        if forms::option(ui, s.package == *p, p).clicked() {
+                                            s.package = p.clone();
+                                            ui.close();
+                                        }
+                                    }
+                                })
+                                .on_hover_text("Use an existing package");
+                            });
                         }
                     });
-            }
+                }
+            });
+            forms::text_area(
+                ui,
+                "Script",
+                &mut s.script,
+                8,
+                true,
+                "sudo systemctl restart {{service}}",
+            );
+            forms::help(
+                ui,
+                "Use {{variable}} placeholders and you'll be asked for values when running.",
+                pal,
+            );
+            forms::Input::new("Description").show(ui, &mut s.description);
+            forms::tag_input(ui, "Tags", &mut s.tags);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                forms::label(ui, "Hotkey, runs it in the active terminal", pal);
+                self.hotkey_field(ui, s, pal);
+            });
         });
-        field(ui, "Hotkey (runs it in the active terminal)", pal);
-        self.hotkey_field(ui, s, pal);
-        field(ui, "Script", pal);
-        ui.add(
-            TextEdit::multiline(&mut s.script)
-                .code_editor()
-                .desired_rows(8)
-                .desired_width(f32::INFINITY)
-                .hint_text("sudo systemctl restart {{service}}"),
-        );
-        ui.label(
-            RichText::new(
-                "Use {{variable}} placeholders — you'll be asked for values when running.",
-            )
-            .small()
-            .color(pal.text_dim),
-        );
-        field(ui, "Description", pal);
-        ui.add(TextEdit::singleline(&mut s.description).desired_width(f32::INFINITY));
-        field(ui, "Tags (comma separated)", pal);
-        let mut tags = s.tags.join(", ");
-        if ui
-            .add(TextEdit::singleline(&mut tags).desired_width(f32::INFINITY))
-            .changed()
-        {
-            s.tags = tags
-                .split(',')
-                .map(|x| x.trim().to_string())
-                .filter(|x| !x.is_empty())
-                .collect();
-        }
     }
 }
 
 pub fn serial_form(ui: &mut egui::Ui, cfg: &mut SerialConfig, pal: Palette) {
     let ports = crate::conn::serial::list_ports();
-    field(ui, "Device", pal);
-    ui.horizontal(|ui| {
-        ui.add(
-            TextEdit::singleline(&mut cfg.device)
-                .hint_text("/dev/ttyUSB0 or COM3")
-                .desired_width(200.0),
-        );
-        egui::ComboBox::from_id_salt("serial-ports")
-            .selected_text("Detected")
-            .show_ui(ui, |ui| {
-                if ports.is_empty() {
-                    ui.label("No serial ports found");
-                }
-                for p in &ports {
-                    if ui.selectable_label(cfg.device == *p, p).clicked() {
-                        cfg.device = p.clone();
-                    }
-                }
-            });
-    });
-    egui::Grid::new("serial-grid")
-        .num_columns(2)
-        .spacing([12.0, 6.0])
-        .show(ui, |ui| {
-            ui.label("Baud rate");
-            egui::ComboBox::from_id_salt("baud")
-                .selected_text(cfg.baud_rate.to_string())
-                .show_ui(ui, |ui| {
-                    for b in crate::conn::serial::BAUD_RATES {
-                        ui.selectable_value(&mut cfg.baud_rate, *b, b.to_string());
+    let baud_options: Vec<(u32, String)> = crate::conn::serial::BAUD_RATES
+        .iter()
+        .map(|b| (*b, b.to_string()))
+        .collect();
+    forms::columns(ui, &[2.0, 1.0], |column, ui| {
+        if column == 0 {
+            forms::Input::new("Device")
+                .hint("/dev/ttyUSB0 or COM3")
+                .mono()
+                .show(ui, &mut cfg.device);
+            if !ports.is_empty() {
+                let width = ui.available_width();
+                forms::select(ui, "detected-ports", width, "Detected ports", true, |ui| {
+                    for port in &ports {
+                        if forms::option(ui, cfg.device == *port, port).clicked() {
+                            cfg.device = port.clone();
+                            ui.close();
+                        }
                     }
                 });
-            ui.end_row();
-            ui.label("Data bits");
-            ui.horizontal(|ui| {
-                for b in [5u8, 6, 7, 8] {
-                    ui.selectable_value(&mut cfg.data_bits, b, b.to_string());
-                }
-            });
-            ui.end_row();
-            ui.label("Stop bits");
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut cfg.stop_bits, 1, "1");
-                ui.selectable_value(&mut cfg.stop_bits, 2, "2");
-            });
-            ui.end_row();
-            ui.label("Parity");
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut cfg.parity, Parity::None, "None");
-                ui.selectable_value(&mut cfg.parity, Parity::Odd, "Odd");
-                ui.selectable_value(&mut cfg.parity, Parity::Even, "Even");
-            });
-            ui.end_row();
-            ui.label("Flow control");
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut cfg.flow_control, FlowControl::None, "None");
-                ui.selectable_value(&mut cfg.flow_control, FlowControl::Software, "XON/XOFF");
-                ui.selectable_value(&mut cfg.flow_control, FlowControl::Hardware, "RTS/CTS");
-            });
-            ui.end_row();
-            ui.label("Enter sends");
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut cfg.line_ending, "\r".to_string(), "CR");
-                ui.selectable_value(&mut cfg.line_ending, "\n".to_string(), "LF");
-                ui.selectable_value(&mut cfg.line_ending, "\r\n".to_string(), "CRLF");
-            });
-            ui.end_row();
+            }
+        } else {
+            forms::select_field(ui, "Baud rate", &mut cfg.baud_rate, &baud_options);
+        }
+    });
+    forms::columns(ui, &[1.0, 1.0], |column, ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            if column == 0 {
+                forms::label(ui, "Data bits", pal);
+                forms::segmented(
+                    ui,
+                    "data-bits",
+                    &mut cfg.data_bits,
+                    &[(5u8, "5"), (6, "6"), (7, "7"), (8, "8")],
+                );
+            } else {
+                forms::label(ui, "Stop bits", pal);
+                forms::segmented(ui, "stop-bits", &mut cfg.stop_bits, &[(1u8, "1"), (2, "2")]);
+            }
         });
-    ui.checkbox(&mut cfg.local_echo, "Local echo");
+    });
+    forms::columns(ui, &[1.0, 1.0], |column, ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            if column == 0 {
+                forms::label(ui, "Parity", pal);
+                forms::segmented(
+                    ui,
+                    "parity",
+                    &mut cfg.parity,
+                    &[
+                        (Parity::None, "None"),
+                        (Parity::Odd, "Odd"),
+                        (Parity::Even, "Even"),
+                    ],
+                );
+            } else {
+                forms::label(ui, "Flow control", pal);
+                forms::segmented(
+                    ui,
+                    "flow",
+                    &mut cfg.flow_control,
+                    &[
+                        (FlowControl::None, "None"),
+                        (FlowControl::Software, "XON/XOFF"),
+                        (FlowControl::Hardware, "RTS/CTS"),
+                    ],
+                );
+            }
+        });
+    });
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        forms::label(ui, "Enter sends", pal);
+        forms::segmented(
+            ui,
+            "line-ending",
+            &mut cfg.line_ending,
+            &[
+                ("\r".to_string(), "CR"),
+                ("\n".to_string(), "LF"),
+                ("\r\n".to_string(), "CRLF"),
+            ],
+        );
+    });
+    forms::switch_row(
+        ui,
+        "Local echo",
+        "Show what you type before the device echoes it.",
+        &mut cfg.local_echo,
+    );
+}
+
+fn address_error_key() -> egui::Id {
+    egui::Id::unique("editor-address-error")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(h: &Host) -> ResolvedTarget {
+        Vault::default().resolve(h)
+    }
+
+    fn ssh_host() -> Host {
+        let mut h = Host {
+            address: "10.0.1.12".into(),
+            ..Default::default()
+        };
+        h.settings.username = Some("deploy".into());
+        h
+    }
+
+    #[test]
+    fn plain_ssh_omits_the_default_port() {
+        let h = ssh_host();
+        assert_eq!(equivalent_command(&h, &target(&h)), "ssh deploy@10.0.1.12");
+    }
+
+    #[test]
+    fn ssh_flags_follow_the_draft_and_never_show_secrets() {
+        let mut h = ssh_host();
+        h.settings.port = Some(2222);
+        h.settings.agent_forwarding = Some(true);
+        h.settings.password = Some("hunter2".into());
+        h.settings.proxy = Some(ProxyConfig {
+            kind: ProxyKind::Socks5,
+            host: "127.0.0.1".into(),
+            port: 1080,
+            password: "proxy-secret".into(),
+            ..Default::default()
+        });
+        let command = equivalent_command(&h, &target(&h));
+        assert_eq!(
+            command,
+            "ssh -p 2222 -A -o ProxyCommand=\"nc -X 5 -x 127.0.0.1:1080 %h %p\" deploy@10.0.1.12"
+        );
+        assert!(!command.contains("hunter2"));
+        assert!(!command.contains("proxy-secret"));
+    }
+
+    #[test]
+    fn missing_address_shows_a_placeholder() {
+        let h = Host::default();
+        assert!(equivalent_command(&h, &target(&h)).ends_with("@<host>"));
+    }
+
+    #[test]
+    fn other_protocols_use_their_own_command() {
+        let mut mosh = ssh_host();
+        mosh.protocol = Protocol::Mosh;
+        mosh.settings.port = Some(2200);
+        assert_eq!(
+            equivalent_command(&mosh, &target(&mosh)),
+            "mosh --ssh=\"ssh -p 2200\" deploy@10.0.1.12"
+        );
+        let telnet = Host {
+            protocol: Protocol::Telnet,
+            address: "router".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            equivalent_command(&telnet, &target(&telnet)),
+            "telnet router 23"
+        );
+        let mut serial = Host {
+            protocol: Protocol::Serial,
+            ..Default::default()
+        };
+        serial.serial.device = "/dev/ttyUSB0".into();
+        serial.serial.baud_rate = 115_200;
+        assert_eq!(
+            equivalent_command(&serial, &target(&serial)),
+            "screen /dev/ttyUSB0 115200"
+        );
+    }
 }

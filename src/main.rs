@@ -47,6 +47,7 @@ fn main() -> eframe::Result<()> {
         }
     };
 
+    ui::motion::detect_system_preference();
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).ok();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Ferrum")

@@ -17,11 +17,6 @@ pub enum Source<'a> {
 }
 
 pub fn show(ui: &mut egui::Ui, pal: Palette, monitor: &Monitor, source: Source) {
-    ui.label(
-        RichText::new(format!("{} Server health", crate::icons::MONITOR))
-            .strong()
-            .size(16.0),
-    );
     let host = match source {
         Source::Ssh(host) => host,
         Source::Unsupported => {
@@ -99,7 +94,8 @@ fn level_color(pal: Palette, percent: f32) -> Color32 {
     } else if percent >= 75.0 {
         pal.warning
     } else {
-        pal.accent
+        // Measured values wear steel, so ember keeps meaning "act here".
+        pal.steel
     }
 }
 
@@ -115,7 +111,12 @@ fn heading(ui: &mut egui::Ui, pal: Palette, title: &str, value: &str, color: Col
     ui.horizontal(|ui| {
         ui.label(RichText::new(title).small().color(pal.text_dim));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(value).strong().size(18.0).color(color));
+            ui.label(
+                RichText::new(value)
+                    .family(crate::fonts::mono_medium())
+                    .size(14.0)
+                    .color(color),
+            );
         });
     });
 }
@@ -124,7 +125,7 @@ fn bar(ui: &mut egui::Ui, pal: Palette, percent: f32) {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(3), pal.bg);
+        .rect_filled(rect, CornerRadius::same(3), pal.card_hover);
     let width = rect.width() * (percent / 100.0).clamp(0.0, 1.0);
     if width > 0.0 {
         let filled = Rect::from_min_size(rect.min, Vec2::new(width.max(3.0), rect.height()));
@@ -137,7 +138,7 @@ fn bar(ui: &mut egui::Ui, pal: Palette, percent: f32) {
 fn sparkline(ui: &mut egui::Ui, pal: Palette, history: &[f32]) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(6), pal.bg);
+        .rect_filled(rect, CornerRadius::same(6), pal.well);
     if history.len() < 2 {
         return;
     }
