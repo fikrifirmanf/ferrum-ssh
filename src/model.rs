@@ -640,6 +640,8 @@ pub struct ResolvedTarget {
     pub use_agent: bool,
     pub agent_forwarding: bool,
     pub startup_script: Option<String>,
+    /// Ephemeral SSH exec target, used for dedicated container terminals. Never saved.
+    pub exec_command: Option<String>,
     pub env: Vec<(String, String)>,
     pub keepalive_secs: u32,
     pub strict_host_key_check: bool,
@@ -770,6 +772,7 @@ impl Vault {
             use_agent: pick!(use_agent).unwrap_or(true),
             agent_forwarding: pick!(agent_forwarding).unwrap_or(false),
             startup_script,
+            exec_command: None,
             env,
             keepalive_secs: pick!(keepalive_secs).unwrap_or(self.settings.default_keepalive_secs),
             strict_host_key_check: pick!(strict_host_key_check).unwrap_or(false),

@@ -124,6 +124,7 @@ impl FsPane {
 }
 
 pub struct SftpTab {
+    pub sync: Option<crate::ui::sync_view::SyncDialog>,
     pub id: u64,
     pub title: String,
     pub left: FsPane,
@@ -472,7 +473,7 @@ impl App {
         }
     }
 
-    fn spawn_opts(&self) -> conn::SpawnOptions {
+    pub(crate) fn spawn_opts(&self) -> conn::SpawnOptions {
         let s = &self.vault.settings;
         conn::SpawnOptions {
             scrollback: s.scrollback,
@@ -528,6 +529,10 @@ impl App {
 
     pub fn open_target(&mut self, target: ResolvedTarget) {
         let session = self.new_session(target);
+        self.open_terminal_session(session);
+    }
+
+    pub(crate) fn open_terminal_session(&mut self, session: Session) {
         let id = conn::next_id();
         self.tabs.push(Tab::Terminal(TermTab {
             id,
@@ -614,6 +619,7 @@ impl App {
             right.host_picker = true;
         }
         self.tabs.push(Tab::Sftp(SftpTab {
+            sync: None,
             id,
             title,
             left,
@@ -813,6 +819,32 @@ impl App {
                 } => {
                     if let Some(tt) = self.container_tab(tab, session) {
                         tt.containers.apply_list(result);
+                    }
+                }
+                AppEvent::ContainerResources {
+                    tab,
+                    session,
+                    result,
+                } => {
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        tt.containers.manager.apply_stats(result);
+                        if let Some(listing) = &tt.containers.listing {
+                            tt.containers.manager.reconcile(listing);
+                        }
+                    }
+                }
+                AppEvent::ContainerDetail {
+                    tab,
+                    session,
+                    key,
+                    sequence,
+                    detail,
+                    result,
+                } => {
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        tt.containers
+                            .manager
+                            .apply_detail(&key, sequence, detail, result);
                     }
                 }
                 AppEvent::ContainerAction {
@@ -1467,7 +1499,26 @@ impl App {
                                 .color(pal.text_dim),
                         );
                     });
-                    let fw = self.forwards.running_count();
+                    let fw = self.forwards.running_count()
+                        + self
+                            .tabs
+                            .iter()
+                            .map(|tab| match tab {
+                                Tab::Terminal(tab) => tab
+                                    .containers
+                                    .manager
+                                    .tunnels
+                                    .values()
+                                    .filter(|tunnel| {
+                                        matches!(
+                                            tunnel.status(),
+                                            crate::containers::ports::TunnelStatus::Ready(_)
+                                        )
+                                    })
+                                    .count(),
+                                _ => 0,
+                            })
+                            .sum::<usize>();
                     ui.label(
                         RichText::new(plural(fw, "tunnel"))
                             .small()

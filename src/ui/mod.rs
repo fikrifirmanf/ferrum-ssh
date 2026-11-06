@@ -1,6 +1,7 @@
 //! UI building blocks plus the chrome (tab bar, sidebar, toasts, palette).
 
 pub mod container_view;
+pub mod container_manager;
 pub mod dialogs;
 pub mod editors;
 pub mod forms;
@@ -11,6 +12,7 @@ pub mod motion;
 pub mod pages;
 pub mod settings;
 pub mod sftp_view;
+pub mod sync_view;
 pub mod term_view;
 pub mod terminal;
 pub mod updates;

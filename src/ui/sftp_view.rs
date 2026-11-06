@@ -24,6 +24,7 @@ pub struct TransferRetry {
 
 enum FsAction {
     Navigate(u64, String),
+    Refresh(u64),
     Back(u64),
     Forward(u64),
     Connect(u64, Uuid),
@@ -58,6 +59,7 @@ impl App {
             .collect();
         let mut actions: Vec<FsAction> = vec![];
         let mut toggle_hidden = false;
+        let sync_rt = self.rt.handle().clone();
 
         let Some(Tab::Sftp(tab)) = self.tabs.get_mut(idx) else {
             return;
@@ -81,7 +83,32 @@ impl App {
                         .small()
                         .color(pal.text_dim),
                 );
-                ui.add_space(16.0);
+                ui.add_space(8.0);
+                let ready = tab.left.backend.is_some()
+                    && tab.right.backend.is_some()
+                    && !tab.left.loading
+                    && !tab.right.loading
+                    && !tab.left.path.is_empty()
+                    && !tab.right.path.is_empty();
+                if ui
+                    .add_enabled(ready, forms::Btn::secondary("Sync folders"))
+                    .on_disabled_hover_text("Open a folder in each location first.")
+                    .clicked()
+                {
+                    if let (Some(left), Some(right)) = (&tab.left.backend, &tab.right.backend) {
+                        tab.sync = Some(super::sync_view::SyncDialog::new(
+                            crate::sftp::sync::Location {
+                                backend: left.clone(),
+                                path: tab.left.path.clone(),
+                            },
+                            crate::sftp::sync::Location {
+                                backend: right.clone(),
+                                path: tab.right.path.clone(),
+                            },
+                        ));
+                    }
+                }
+                ui.add_space(8.0);
                 let narrow = ui.ctx().content_rect().width() < 900.0;
                 let key = egui::Id::unique(("sftp-visible-pane", tab.id));
                 let mut right_visible = ui.data(|d| d.get_temp::<bool>(key).unwrap_or(false));
@@ -156,6 +183,13 @@ impl App {
                 }
             });
 
+        if let Some(sync) = tab.sync.as_mut() {
+            if sync.show(ui.ctx(), tab.id, pal, &sync_rt) {
+                tab.sync = None;
+                actions.push(FsAction::Refresh(left_id));
+                actions.push(FsAction::Refresh(right_id));
+            }
+        }
         if toggle_hidden {
             self.vault.settings.sftp_show_hidden = !show_hidden;
             self.mark_dirty();
@@ -167,6 +201,11 @@ impl App {
 
     fn run_fs_action(&mut self, a: FsAction) {
         match a {
+            FsAction::Refresh(pane) => {
+                if let Some(path) = self.fs_pane_mut(pane).map(|p| p.path.clone()) {
+                    self.fs_refresh_keep_history(pane, path);
+                }
+            }
             FsAction::Navigate(pane, path) => {
                 if let Some(p) = self.fs_pane_mut(pane) {
                     p.forward.clear();
@@ -480,342 +519,348 @@ fn fs_pane(
     toggle_hidden: &mut bool,
 ) {
     let id = p.id;
-    egui::Frame::new()
-        .fill(pal.panel)
-        .stroke(Stroke::new(1.0, pal.border))
-        .corner_radius(0)
-        .inner_margin(egui::Margin::same(16))
-        .show(ui, |ui| {
-            ui.set_min_size(ui.available_size());
+    // Inputs derive persistent IDs from the UI scope, so each location needs its own.
+    ui.push_id(("sftp-pane", id), |ui| {
+        egui::Frame::new()
+            .fill(pal.panel)
+            .stroke(Stroke::new(1.0, pal.border))
+            .corner_radius(0)
+            .inner_margin(egui::Margin::same(16))
+            .show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
 
-            // ----- Location header -----
-            ui.horizontal(|ui| {
-                let label = match &p.backend {
-                    Some(b) => b.label(),
-                    None if p.connecting => "Connecting…".into(),
-                    None => "Choose a location".into(),
-                };
-                let icon = if p.backend.as_ref().is_some_and(|b| b.is_local()) {
-                    "\u{E586}"
-                } else {
-                    "\u{E2A0}"
-                };
-                ui.label(RichText::new(icon).size(16.0));
-                ui.menu_button(
-                    RichText::new(format!("{label}  \u{E136}")).family(crate::fonts::semibold()),
-                    |ui| {
-                        ui.set_min_width(240.0);
-                        if ui
-                            .add(forms::Btn::secondary(format!(
-                                "{}  Local computer",
-                                crate::icons::LAPTOP
-                            )))
-                            .clicked()
-                        {
-                            actions.push(FsAction::UseLocal(id));
-                            ui.close();
-                        }
-                        ui.separator();
-                        egui::ScrollArea::vertical()
-                            .max_height(300.0)
-                            .show(ui, |ui| {
-                                for (hid, name, addr) in hosts {
-                                    if ui
-                                        .button(format!("\u{E2A0}  {name}"))
-                                        .on_hover_text(addr)
-                                        .clicked()
-                                    {
-                                        actions.push(FsAction::Connect(id, *hid));
-                                        ui.close();
-                                    }
-                                }
-                            });
-                    },
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if matches!(p.backend, Some(Backend::Remote { .. }))
-                        && ui
-                            .add(ghost_button("\u{E212}"))
-                            .on_hover_text("Disconnect")
-                            .clicked()
-                    {
-                        actions.push(FsAction::Disconnect(id));
-                    }
-                    let eye = if show_hidden { "\u{E220}" } else { "\u{E224}" };
-                    if ui
-                        .add(ghost_button(eye))
-                        .on_hover_text("Show hidden files")
-                        .clicked()
-                    {
-                        *toggle_hidden = true;
-                    }
-                });
-            });
-
-            if p.backend.is_none() {
-                ui.add_space(12.0);
-                if p.connecting {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Connecting…");
-                    });
-                } else {
-                    host_picker(ui, id, hosts, pal, actions);
-                }
-                if let Some(e) = &p.error {
-                    ui.add_space(8.0);
-                    ui.colored_label(pal.danger, e);
-                }
-                return;
-            }
-            let backend = p.backend.clone().unwrap_or(Backend::Local);
-
-            // ----- Navigation bar -----
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(!p.back.is_empty(), egui::Button::new("←"))
-                    .on_hover_text("Back")
-                    .clicked()
-                {
-                    actions.push(FsAction::Back(id));
-                }
-                if ui
-                    .add_enabled(!p.forward.is_empty(), egui::Button::new("→"))
-                    .on_hover_text("Forward")
-                    .clicked()
-                {
-                    actions.push(FsAction::Forward(id));
-                }
-                let parent = backend.parent(&p.path);
-                if ui
-                    .add_enabled(parent.is_some(), egui::Button::new("↑"))
-                    .on_hover_text("Parent folder")
-                    .clicked()
-                {
-                    if let Some(par) = parent {
-                        actions.push(FsAction::Navigate(id, par));
-                    }
-                }
-                if ui
-                    .add(forms::Btn::icon(crate::icons::ARROWS_CLOCKWISE, "Refresh"))
-                    .on_hover_text("Refresh")
-                    .clicked()
-                {
-                    p.forward.clear();
-                    actions.push(FsAction::Navigate(id, p.path.clone()));
-                    p.path.clear();
-                }
-                let r = forms::Input::bare("Path")
-                    .mono()
-                    .width((ui.available_width() - 160.0).max(80.0))
-                    .show(ui, &mut p.path_edit);
-                if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    actions.push(FsAction::Navigate(id, p.path_edit.trim().to_string()));
-                }
-                forms::Input::bare("Filter files")
-                    .hint("Filter")
-                    .icon(crate::icons::MAGNIFYING_GLASS)
-                    .width(150.0)
-                    .show(ui, &mut p.filter);
-            });
-
-            // ----- Directional actions -----
-            let selected = selected_entries(p);
-            ui.horizontal_wrapped(|ui| {
-                let direction = match (backend.is_local(), other_backend.map(Backend::is_local)) {
-                    (true, Some(false)) => "Upload selected",
-                    (false, Some(true)) => "Download selected",
-                    _ => "Copy selected",
-                };
-                let label = format!("{direction} ({})", selected.len());
-                if ui
-                    .add_enabled(
-                        !selected.is_empty() && other_backend.is_some(),
-                        primary_button(&label, pal),
-                    )
-                    .on_disabled_hover_text(if other_backend.is_none() {
-                        "Choose a destination in the other location first."
-                    } else {
-                        "Select one or more files first."
-                    })
-                    .clicked()
-                {
-                    actions.push(FsAction::Copy {
-                        from: id,
-                        entries: selected.clone(),
-                        to: other_id,
-                    });
-                }
-                if !other_selected.is_empty()
-                    && ui
-                        .add(ghost_button(&format!(
-                            "\u{E058} Copy {} here",
-                            other_selected.len()
-                        )))
-                        .clicked()
-                {
-                    actions.push(FsAction::Copy {
-                        from: other_id,
-                        entries: other_selected.to_vec(),
-                        to: id,
-                    });
-                }
-                ui.menu_button("+ New", |ui| {
-                    if ui.button("\u{E25A}  Folder").clicked() {
-                        p.new_folder = Some(String::new());
-                        ui.close();
-                    }
-                    if ui.button("\u{E230}  File").clicked() {
-                        p.new_file = Some(String::new());
-                        ui.close();
-                    }
-                });
-                let one = (selected.len() == 1).then(|| selected[0].clone());
-                if ui
-                    .add_enabled(one.is_some(), egui::Button::new("Rename"))
-                    .clicked()
-                {
-                    if let Some(e) = &one {
-                        p.rename = Some((e.path.clone(), e.name.clone()));
-                    }
-                }
-                if !backend.is_local()
-                    && ui
-                        .add_enabled(one.is_some(), egui::Button::new("Permissions"))
-                        .clicked()
-                {
-                    if let Some(e) = &one {
-                        p.chmod = Some((e.path.clone(), e.perms.unwrap_or(0o644) & 0o7777));
-                    }
-                }
-                if ui
-                    .add_enabled(!selected.is_empty(), danger_button("Delete", pal))
-                    .clicked()
-                {
-                    p.confirm_delete = Some(selected.clone());
-                }
-            });
-
-            if let Some(e) = &p.error {
-                ui.colored_label(pal.danger, e);
-            }
-
-            // ----- Inline editors (new folder / file, rename, chmod, delete) -----
-            inline_forms(ui, p, &backend, pal, actions);
-
-            // ----- File list -----
-            ui.add_space(4.0);
-            let entries = visible_entries(p, show_hidden);
-            header_row(ui, p, pal);
-            if p.loading && p.entries.is_empty() {
+                // ----- Location header -----
                 ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Loading files…");
-                });
-            } else if entries.is_empty() {
-                ui.add_space(16.0);
-                ui.label(
-                    RichText::new(if p.filter.is_empty() {
-                        "This folder is empty."
+                    let label = match &p.backend {
+                        Some(b) => b.label(),
+                        None if p.connecting => "Connecting…".into(),
+                        None => "Choose a location".into(),
+                    };
+                    let icon = if p.backend.as_ref().is_some_and(|b| b.is_local()) {
+                        "\u{E586}"
                     } else {
-                        "No files match the filter."
-                    })
-                    .color(pal.text_dim),
-                );
-            }
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .id_salt(("fs-list", id))
-                .show_rows(ui, ROW_H, entries.len(), |ui, range| {
-                    for e in &entries[range] {
-                        let resp = file_row(ui, e, p.selected.contains(&e.path), pal);
-                        if resp.clicked() {
-                            let multi = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
-                            if multi {
-                                if !p.selected.remove(&e.path) {
-                                    p.selected.insert(e.path.clone());
-                                }
-                            } else {
-                                p.selected.clear();
-                                p.selected.insert(e.path.clone());
-                            }
-                        }
-                        if resp.double_clicked() {
-                            if e.is_dir {
-                                actions.push(FsAction::Navigate(id, e.path.clone()));
-                            } else if backend.is_local() {
-                                actions.push(FsAction::OpenLocal(e.path.clone()));
-                            } else {
-                                actions.push(FsAction::Edit(id, e.path.clone()));
-                            }
-                        }
-                        resp.context_menu(|ui| {
-                            if !p.selected.contains(&e.path) {
-                                p.selected.clear();
-                                p.selected.insert(e.path.clone());
-                            }
-                            if e.is_dir && ui.button("Open").clicked() {
-                                actions.push(FsAction::Navigate(id, e.path.clone()));
-                                ui.close();
-                            }
-                            if !e.is_dir
-                                && ui
-                                    .button(if backend.is_local() {
-                                        "Open"
-                                    } else {
-                                        "Edit in external editor"
-                                    })
-                                    .clicked()
+                        "\u{E2A0}"
+                    };
+                    ui.label(RichText::new(icon).size(16.0));
+                    ui.menu_button(
+                        RichText::new(format!("{label}  \u{E136}"))
+                            .family(crate::fonts::semibold()),
+                        |ui| {
+                            ui.set_min_width(240.0);
+                            if ui
+                                .add(forms::Btn::secondary(format!(
+                                    "{}  Local computer",
+                                    crate::icons::LAPTOP
+                                )))
+                                .clicked()
                             {
-                                actions.push(if backend.is_local() {
-                                    FsAction::OpenLocal(e.path.clone())
-                                } else {
-                                    FsAction::Edit(id, e.path.clone())
-                                });
-                                ui.close();
-                            }
-                            if ui.button("Copy to other side").clicked() {
-                                actions.push(FsAction::Copy {
-                                    from: id,
-                                    entries: selected_entries(p),
-                                    to: other_id,
-                                });
-                                ui.close();
-                            }
-                            if ui.button("Copy path").clicked() {
-                                ui.ctx().copy_text(e.path.clone());
-                                ui.close();
-                            }
-                            if ui.button("Rename").clicked() {
-                                p.rename = Some((e.path.clone(), e.name.clone()));
-                                ui.close();
-                            }
-                            if !backend.is_local() && ui.button("Permissions").clicked() {
-                                p.chmod = Some((e.path.clone(), e.perms.unwrap_or(0o644) & 0o7777));
+                                actions.push(FsAction::UseLocal(id));
                                 ui.close();
                             }
                             ui.separator();
-                            if ui
-                                .button(RichText::new("Delete").color(pal.danger))
+                            egui::ScrollArea::vertical()
+                                .max_height(300.0)
+                                .show(ui, |ui| {
+                                    for (hid, name, addr) in hosts {
+                                        if ui
+                                            .button(format!("\u{E2A0}  {name}"))
+                                            .on_hover_text(addr)
+                                            .clicked()
+                                        {
+                                            actions.push(FsAction::Connect(id, *hid));
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if matches!(p.backend, Some(Backend::Remote { .. }))
+                            && ui
+                                .add(ghost_button("\u{E212}"))
+                                .on_hover_text("Disconnect")
                                 .clicked()
-                            {
-                                p.confirm_delete = Some(selected_entries(p));
-                                ui.close();
-                            }
+                        {
+                            actions.push(FsAction::Disconnect(id));
+                        }
+                        let eye = if show_hidden { "\u{E220}" } else { "\u{E224}" };
+                        if ui
+                            .add(ghost_button(eye))
+                            .on_hover_text("Show hidden files")
+                            .clicked()
+                        {
+                            *toggle_hidden = true;
+                        }
+                    });
+                });
+
+                if p.backend.is_none() {
+                    ui.add_space(12.0);
+                    if p.connecting {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Connecting…");
+                        });
+                    } else {
+                        host_picker(ui, id, hosts, pal, actions);
+                    }
+                    if let Some(e) = &p.error {
+                        ui.add_space(8.0);
+                        ui.colored_label(pal.danger, e);
+                    }
+                    return;
+                }
+                let backend = p.backend.clone().unwrap_or(Backend::Local);
+
+                // ----- Navigation bar -----
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(!p.back.is_empty(), egui::Button::new("←"))
+                        .on_hover_text("Back")
+                        .clicked()
+                    {
+                        actions.push(FsAction::Back(id));
+                    }
+                    if ui
+                        .add_enabled(!p.forward.is_empty(), egui::Button::new("→"))
+                        .on_hover_text("Forward")
+                        .clicked()
+                    {
+                        actions.push(FsAction::Forward(id));
+                    }
+                    let parent = backend.parent(&p.path);
+                    if ui
+                        .add_enabled(parent.is_some(), egui::Button::new("↑"))
+                        .on_hover_text("Parent folder")
+                        .clicked()
+                    {
+                        if let Some(par) = parent {
+                            actions.push(FsAction::Navigate(id, par));
+                        }
+                    }
+                    if ui
+                        .add(forms::Btn::icon(crate::icons::ARROWS_CLOCKWISE, "Refresh"))
+                        .on_hover_text("Refresh")
+                        .clicked()
+                    {
+                        p.forward.clear();
+                        actions.push(FsAction::Navigate(id, p.path.clone()));
+                        p.path.clear();
+                    }
+                    let r = forms::Input::bare("Path")
+                        .mono()
+                        .width((ui.available_width() - 160.0).max(80.0))
+                        .show(ui, &mut p.path_edit);
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                        actions.push(FsAction::Navigate(id, p.path_edit.trim().to_string()));
+                    }
+                    forms::Input::bare("Filter files")
+                        .hint("Filter")
+                        .icon(crate::icons::MAGNIFYING_GLASS)
+                        .width(150.0)
+                        .show(ui, &mut p.filter);
+                });
+
+                // ----- Directional actions -----
+                let selected = selected_entries(p);
+                ui.horizontal_wrapped(|ui| {
+                    let direction = match (backend.is_local(), other_backend.map(Backend::is_local))
+                    {
+                        (true, Some(false)) => "Upload selected",
+                        (false, Some(true)) => "Download selected",
+                        _ => "Copy selected",
+                    };
+                    let label = format!("{direction} ({})", selected.len());
+                    if ui
+                        .add_enabled(
+                            !selected.is_empty() && other_backend.is_some(),
+                            primary_button(&label, pal),
+                        )
+                        .on_disabled_hover_text(if other_backend.is_none() {
+                            "Choose a destination in the other location first."
+                        } else {
+                            "Select one or more files first."
+                        })
+                        .clicked()
+                    {
+                        actions.push(FsAction::Copy {
+                            from: id,
+                            entries: selected.clone(),
+                            to: other_id,
                         });
                     }
+                    if !other_selected.is_empty()
+                        && ui
+                            .add(ghost_button(&format!(
+                                "\u{E058} Copy {} here",
+                                other_selected.len()
+                            )))
+                            .clicked()
+                    {
+                        actions.push(FsAction::Copy {
+                            from: other_id,
+                            entries: other_selected.to_vec(),
+                            to: id,
+                        });
+                    }
+                    ui.menu_button("+ New", |ui| {
+                        if ui.button("\u{E25A}  Folder").clicked() {
+                            p.new_folder = Some(String::new());
+                            ui.close();
+                        }
+                        if ui.button("\u{E230}  File").clicked() {
+                            p.new_file = Some(String::new());
+                            ui.close();
+                        }
+                    });
+                    let one = (selected.len() == 1).then(|| selected[0].clone());
+                    if ui
+                        .add_enabled(one.is_some(), egui::Button::new("Rename"))
+                        .clicked()
+                    {
+                        if let Some(e) = &one {
+                            p.rename = Some((e.path.clone(), e.name.clone()));
+                        }
+                    }
+                    if !backend.is_local()
+                        && ui
+                            .add_enabled(one.is_some(), egui::Button::new("Permissions"))
+                            .clicked()
+                    {
+                        if let Some(e) = &one {
+                            p.chmod = Some((e.path.clone(), e.perms.unwrap_or(0o644) & 0o7777));
+                        }
+                    }
+                    if ui
+                        .add_enabled(!selected.is_empty(), danger_button("Delete", pal))
+                        .clicked()
+                    {
+                        p.confirm_delete = Some(selected.clone());
+                    }
                 });
-            ui.label(
-                RichText::new(format!(
-                    "{} items · {} selected",
-                    entries.len(),
-                    p.selected.len()
-                ))
-                .small()
-                .color(pal.text_dim),
-            );
-        });
+
+                if let Some(e) = &p.error {
+                    ui.colored_label(pal.danger, e);
+                }
+
+                // ----- Inline editors (new folder / file, rename, chmod, delete) -----
+                inline_forms(ui, p, &backend, pal, actions);
+
+                // ----- File list -----
+                ui.add_space(4.0);
+                let entries = visible_entries(p, show_hidden);
+                header_row(ui, p, pal);
+                if p.loading && p.entries.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Loading files…");
+                    });
+                } else if entries.is_empty() {
+                    ui.add_space(16.0);
+                    ui.label(
+                        RichText::new(if p.filter.is_empty() {
+                            "This folder is empty."
+                        } else {
+                            "No files match the filter."
+                        })
+                        .color(pal.text_dim),
+                    );
+                }
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .id_salt(("fs-list", id))
+                    .show_rows(ui, ROW_H, entries.len(), |ui, range| {
+                        for e in &entries[range] {
+                            let resp = file_row(ui, e, p.selected.contains(&e.path), pal);
+                            if resp.clicked() {
+                                let multi = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+                                if multi {
+                                    if !p.selected.remove(&e.path) {
+                                        p.selected.insert(e.path.clone());
+                                    }
+                                } else {
+                                    p.selected.clear();
+                                    p.selected.insert(e.path.clone());
+                                }
+                            }
+                            if resp.double_clicked() {
+                                if e.is_dir {
+                                    actions.push(FsAction::Navigate(id, e.path.clone()));
+                                } else if backend.is_local() {
+                                    actions.push(FsAction::OpenLocal(e.path.clone()));
+                                } else {
+                                    actions.push(FsAction::Edit(id, e.path.clone()));
+                                }
+                            }
+                            resp.context_menu(|ui| {
+                                if !p.selected.contains(&e.path) {
+                                    p.selected.clear();
+                                    p.selected.insert(e.path.clone());
+                                }
+                                if e.is_dir && ui.button("Open").clicked() {
+                                    actions.push(FsAction::Navigate(id, e.path.clone()));
+                                    ui.close();
+                                }
+                                if !e.is_dir
+                                    && ui
+                                        .button(if backend.is_local() {
+                                            "Open"
+                                        } else {
+                                            "Edit in external editor"
+                                        })
+                                        .clicked()
+                                {
+                                    actions.push(if backend.is_local() {
+                                        FsAction::OpenLocal(e.path.clone())
+                                    } else {
+                                        FsAction::Edit(id, e.path.clone())
+                                    });
+                                    ui.close();
+                                }
+                                if ui.button("Copy to other side").clicked() {
+                                    actions.push(FsAction::Copy {
+                                        from: id,
+                                        entries: selected_entries(p),
+                                        to: other_id,
+                                    });
+                                    ui.close();
+                                }
+                                if ui.button("Copy path").clicked() {
+                                    ui.ctx().copy_text(e.path.clone());
+                                    ui.close();
+                                }
+                                if ui.button("Rename").clicked() {
+                                    p.rename = Some((e.path.clone(), e.name.clone()));
+                                    ui.close();
+                                }
+                                if !backend.is_local() && ui.button("Permissions").clicked() {
+                                    p.chmod =
+                                        Some((e.path.clone(), e.perms.unwrap_or(0o644) & 0o7777));
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui
+                                    .button(RichText::new("Delete").color(pal.danger))
+                                    .clicked()
+                                {
+                                    p.confirm_delete = Some(selected_entries(p));
+                                    ui.close();
+                                }
+                            });
+                        }
+                    });
+                ui.label(
+                    RichText::new(format!(
+                        "{} items · {} selected",
+                        entries.len(),
+                        p.selected.len()
+                    ))
+                    .small()
+                    .color(pal.text_dim),
+                );
+            });
+    });
 }
 
 fn host_picker(
@@ -1223,5 +1268,74 @@ fn file_icon(name: &str) -> &'static str {
         | "xml" => "\u{E230}",
         "pem" | "key" | "pub" | "crt" => "\u{E2D6}",
         _ => "\u{E230}",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn collect_text(shape: &egui::Shape, text: &mut String) {
+        match shape {
+            egui::Shape::Text(shape) => {
+                text.push_str(shape.galley.text());
+                text.push('\n');
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_text(shape, text);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn two_local_panes_render_without_widget_id_clashes() {
+        let ctx = egui::Context::default();
+        ctx.options_mut(|options| options.warn_on_id_clash = true);
+        let mut left = FsPane::new();
+        let mut right = FsPane::new();
+        for pane in [&mut left, &mut right] {
+            pane.backend = Some(Backend::Local);
+            pane.path = "/tmp".into();
+            pane.path_edit = pane.path.clone();
+        }
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 800.0))),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            let full = ui.available_rect_before_wrap();
+            let width = full.width() / 2.0;
+            let ids = [left.id, right.id];
+            for (index, pane) in [&mut left, &mut right].into_iter().enumerate() {
+                let rect = Rect::from_min_size(
+                    full.min + Vec2::new(index as f32 * width, 0.0),
+                    Vec2::new(width, full.height()),
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    fs_pane(
+                        ui,
+                        pane,
+                        ids[1 - index],
+                        &[],
+                        Some(&Backend::Local),
+                        &[],
+                        false,
+                        crate::themes::current(ui.ctx()),
+                        &mut vec![],
+                        &mut false,
+                    );
+                });
+            }
+        });
+        output.textures_delta.clear();
+        let mut text = String::new();
+        for shape in &output.shapes {
+            collect_text(&shape.shape, &mut text);
+        }
+        assert_eq!(text.matches("Filter").count(), 2, "both panes must render");
+        assert!(!text.contains("use of widget ID"), "{text}");
     }
 }

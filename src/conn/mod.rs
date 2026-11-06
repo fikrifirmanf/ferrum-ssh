@@ -121,6 +121,20 @@ pub enum AppEvent {
         session: u64,
         result: Result<crate::containers::Listing, String>,
     },
+    ContainerResources {
+        tab: u64,
+        session: u64,
+        result:
+            Result<std::collections::BTreeMap<String, crate::containers::manager::Stats>, String>,
+    },
+    ContainerDetail {
+        tab: u64,
+        session: u64,
+        key: String,
+        sequence: u64,
+        detail: crate::containers::manager::DetailTab,
+        result: Result<String, String>,
+    },
     ContainerAction {
         tab: u64,
         session: u64,
@@ -272,6 +286,27 @@ pub fn spawn_session(
     ctx_template: ConnCtxTemplate,
     opts: SpawnOptions,
 ) -> Session {
+    spawn_session_inner(rt, target, ctx_template, opts, None)
+}
+
+/// A terminal channel on an existing SSH transport. Closing it never disconnects its owner.
+pub fn spawn_ssh_channel(
+    rt: &tokio::runtime::Handle,
+    target: ResolvedTarget,
+    ctx_template: ConnCtxTemplate,
+    opts: SpawnOptions,
+    client: Arc<ssh::SshClient>,
+) -> Session {
+    spawn_session_inner(rt, target, ctx_template, opts, Some(client))
+}
+
+fn spawn_session_inner(
+    rt: &tokio::runtime::Handle,
+    target: ResolvedTarget,
+    ctx_template: ConnCtxTemplate,
+    opts: SpawnOptions,
+    existing_client: Option<Arc<ssh::SshClient>>,
+) -> Session {
     let id = next_id();
     let (tx, rx) = unbounded_channel::<Input>();
     let events = Arc::new(Mutex::new(TermEvents::default()));
@@ -319,7 +354,21 @@ pub fn spawn_session(
         detect_os: ctx_template.detect_os,
         local_shell: ctx_template.local_shell,
     };
-    start_backend(rt, target.clone(), ctx, rx, ssh_slot.clone());
+    if let Some(client) = existing_client {
+        let target = target.clone();
+        let slot = ssh_slot.clone();
+        rt.spawn(async move {
+            let error_ctx = ctx.clone();
+            if let Err(error) =
+                ssh::run_terminal_on_client(target, ctx, rx, slot, client, false).await
+            {
+                error_ctx.info(&format!("{error:#}"));
+                error_ctx.set_status(Status::Failed(format!("{error:#}")));
+            }
+        });
+    } else {
+        start_backend(rt, target.clone(), ctx, rx, ssh_slot.clone());
+    }
     Session {
         id,
         title: target.label.clone(),

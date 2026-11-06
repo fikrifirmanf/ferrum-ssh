@@ -80,6 +80,80 @@ impl ForwardManager {
     }
 }
 
+/// Relay through the same direct-tcpip path used by saved local forwarding rules.
+pub async fn relay_local(
+    mut socket: tokio::net::TcpStream,
+    peer: std::net::SocketAddr,
+    client: Arc<SshClient>,
+    host: String,
+    port: u16,
+) -> Result<()> {
+    let channel = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client.handle.channel_open_direct_tcpip(
+            host,
+            port as u32,
+            peer.ip().to_string(),
+            peer.port() as u32,
+        ),
+    )
+    .await
+    .context("Opening SSH port channel timed out")??;
+    tokio::io::copy_bidirectional(&mut socket, &mut channel.into_stream()).await?;
+    Ok(())
+}
+
+/// A temporary loopback-only listener. Dropping this future closes all child connections.
+pub async fn serve_loopback(
+    client: Arc<SshClient>,
+    host: std::net::IpAddr,
+    port: u16,
+    ready: impl Fn(std::net::SocketAddr),
+    failed_connection: impl Fn(String),
+) -> Result<()> {
+    if port == 0 {
+        bail!("Destination port must be greater than zero");
+    }
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+    let address = listener.local_addr()?;
+    // Do not announce readiness or launch a browser until SSH accepts the destination.
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client.handle.channel_open_direct_tcpip(
+            host.to_string(),
+            port as u32,
+            "127.0.0.1",
+            address.port() as u32,
+        ),
+    )
+    .await
+    .context("Checking the published port timed out")??;
+    probe.close().await?;
+    ready(address);
+    let mut connections = tokio::task::JoinSet::new();
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                if client.handle.is_closed() { bail!("SSH connection closed. Reconnect and open the port again."); }
+            }
+            accepted = listener.accept(), if connections.len() < 64 => {
+                let (socket, peer) = accepted?;
+                let client = client.clone();
+                let host = host.to_string();
+                connections.spawn(async move { relay_local(socket, peer, client, host, port).await });
+            }
+            result = connections.join_next(), if !connections.is_empty() => {
+                match result {
+                    Some(Ok(Err(error))) => failed_connection(format!("Could not forward a connection: {error}")),
+                    Some(Err(error)) => failed_connection(format!("Port connection task failed: {error}")),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 pub async fn run_rule(rule: &PortForward, client: Arc<SshClient>) -> Result<()> {
     match rule.kind {
         ForwardKind::Local => {
@@ -87,22 +161,12 @@ pub async fn run_rule(rule: &PortForward, client: Arc<SshClient>) -> Result<()> 
                 .await
                 .with_context(|| format!("binding {}:{}", rule.bind_address, rule.bind_port))?;
             loop {
-                let (mut sock, peer) = listener.accept().await?;
+                let (sock, peer) = listener.accept().await?;
                 let c = client.clone();
                 let (dh, dp) = (rule.dest_host.clone(), rule.dest_port);
                 tokio::spawn(async move {
-                    if let Ok(ch) = c
-                        .handle
-                        .channel_open_direct_tcpip(
-                            dh,
-                            dp as u32,
-                            peer.ip().to_string(),
-                            peer.port() as u32,
-                        )
-                        .await
-                    {
-                        let mut stream = ch.into_stream();
-                        let _ = tokio::io::copy_bidirectional(&mut sock, &mut stream).await;
+                    if let Err(error) = relay_local(sock, peer, c, dh, dp).await {
+                        log::debug!("Local forwarding connection: {error}");
                     }
                 });
             }

@@ -14,6 +14,7 @@ pub enum Source<'a> {
 
 /// What the user asked for; the caller owns the connection and runs it.
 pub enum Command {
+    OpenManager,
     Act(Item, Action),
     Logs(Item),
     /// Text to type into the terminal (not run).
@@ -39,6 +40,9 @@ pub fn show(
             return None;
         }
     };
+    if ui.add(super::forms::Btn::secondary("Open manager")).clicked() {
+        return Some(Command::OpenManager);
+    }
     if browser.logs.is_some() {
         return logs_view(ui, pal, browser);
     }
