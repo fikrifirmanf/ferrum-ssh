@@ -46,6 +46,36 @@ Choose comfortable or compact rows in the host toolbar or **Settings → Appeara
 - **Server health:** a side panel in any SSH terminal shows live CPU, memory, swap, disks, uptime, load and the busiest processes, read over the same connection every 3 seconds. Linux reports everything; macOS and BSD report load, disks and processes. The host library shows TCP probe results separately from authenticated session state. Direct hosts are checked once a minute while the vault is open; hosts behind a jump host or proxy are skipped. Turn the probes off in Settings → Connections.
 - **Command palette** (⌘K / Ctrl+K) and an optional AI command assistant.
 
+## Container manager
+
+In a connected SSH terminal, choose **Tools → Containers → Open manager**. Search by container name, image, Compose project or service. The table groups Docker and Podman containers by Compose project and keeps Kubernetes pods grouped by namespace.
+
+Select a container for **Logs**, **Stats**, **Inspect**, or **Terminal**. Logs refresh every two seconds and show up to 300 lines, with pause and search controls. Resource samples refresh every five seconds while the manager is open, with up to 60 samples per container. Update ages show when samples become stale; unavailable measurements stay unknown. Kubernetes resource metrics and inspect are not part of this view.
+
+Inspect shows configuration, mounts, networks, ports and restart policy. Environment values, command arguments and arbitrary labels stay on the server. **Open container terminal** creates a separate interactive SSH channel; closing it keeps the host connection open. Start, stop and restart apply to the selected container. The manager uses the server's existing CLIs and installs no agent.
+
+Choose **Ports** to open a published Docker or Podman port locally. Select **HTTP**, **HTTPS**, or **TCP only**, then **Open locally**. Recognized database and messaging ports use TCP automatically. Ferrum rechecks the published binding and asks SSH to connect before announcing readiness. HTTP and HTTPS modes open the local URL in your browser; TCP-only mode gives you an address to use in another client.
+
+Ready tunnels offer editable connection presets for PostgreSQL, MySQL/MariaDB, MongoDB, Redis/Valkey, ClickHouse (native and HTTP), RabbitMQ, MinIO/S3, HTTP/HTTPS and generic TCP. Ferrum suggests a preset from the image and container port; custom images can use a manual preset. **Copy URI** omits the password; **Copy with password** includes it with URI encoding. MinIO provides an endpoint and S3 JSON config.
+
+**Read credentials** fetches only the preset's supported environment fields when requested. These can be initialization values, so verify them if a login fails. Password files, custom configuration, ACL users and rotated credentials require manual entry. Ferrum does not create accounts or change passwords. Credentials stay in memory for the temporary tunnel; stopping it clears the password. Browser links never include these credentials.
+
+Each tunnel uses a free port on `127.0.0.1`. Wildcard IPv4 and IPv6 bindings connect through the corresponding loopback address on the SSH server; specific bindings keep their IP address. UDP and SCTP ports cannot use these SSH tunnels. This feature expects the container port to be published on the SSH server itself.
+
+Use **Copy address**, **Open browser**, or **Stop tunnel** in the active tunnel list. Stop closes existing connections too. Temporary tunnels close when you change SSH panes, close their tab, disconnect, or remove the container. Each SSH session can open up to 16 temporary tunnels. Saved forwarding rules stay separate.
+
+At the minimum window size, select a row to open its details and choose **All containers** to return to the list.
+
+## Folder sync
+
+Open a folder in each File transfer pane, then choose **Sync folders**. Choose **Left → Right** or **Right → Left**, then **Compare folders** to preview the changes. Comparison reads file contents on both sides, including remote files.
+
+**Copy / update** copies new and changed files and keeps destination-only files. **Mirror files** also proposes deleting destination-only files. Review the list and confirm deletions before choosing **Apply changes**. Empty destination folders stay in place.
+
+Use comma-separated exclusions such as `.git, node_modules, *.log, build/*`. Patterns match relative paths or individual names; `*` matches any text and `?` matches one character. Excluding a folder skips its contents. Hidden files participate unless excluded. Exclude symbolic links and special files before comparing.
+
+Sync checks both folders again before applying a preview. It stops if either folder has changed. Cancel stops further work and keeps completed changes. Comparison allows up to 20,000 entries and 64 folder levels, with a two-minute deadline. File/folder conflicts, overlapping folders, and names that differ only by case require resolution before syncing.
+
 ## Build
 
 ```sh

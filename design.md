@@ -205,6 +205,8 @@ The editor is one 760 px column: the live equivalent command, a card with protoc
 
 SFTP keeps local and remote labels, path breadcrumbs, file rows, and a directional transfer action. Selection precedes transfer. The queue shows bytes, percent, state, cancel, and retry. Terminal tools use one panel for health or containers. Broadcast input stays off by default; enabled mode names the target panes and remains visible above the terminal. AI stays an optional command tool and never executes proposed commands automatically.
 
+The container sidebar offers Open manager for a full-width workspace in the current SSH tab. Use a searchable table grouped by Compose project or Kubernetes namespace, with Logs, Stats, Inspect and Terminal below the selected row. Measured resources use steel and include update age. At short window heights, show either the list or selected details with an All containers return action. Keep the host terminal available through Back to terminal; container shells open in separate terminal tabs.
+
 State requirements: loading preserves layout and names the operation; empty libraries offer Add host and Import hosts; no matches offer Clear filters; connection errors retain input and offer Retry or Edit host. Authentication failures never report a password value. Host-key changes block connection with old/new fingerprints and an explicit trust decision. Transfer errors retain the file and destination with Retry. Disabled controls explain the unmet prerequisite. Long labels truncate only with an accessible full name; errors and commands wrap. Support keyboard selection and reveal focused rows in long lists.
 
 ## Graphics & Effects

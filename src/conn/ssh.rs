@@ -212,20 +212,39 @@ pub struct SshClient {
 
 impl SshClient {
     pub async fn exec(&self, cmd: &str) -> Result<(String, u32)> {
+        self.exec_limited(cmd, usize::MAX).await
+    }
+
+    /// Close the command channel if the caller's byte budget is exceeded.
+    pub async fn exec_limited(&self, cmd: &str, limit: usize) -> Result<(String, u32)> {
         let mut ch = self.handle.channel_open_session().await?;
         ch.exec(true, cmd).await?;
         let mut out = Vec::new();
-        let mut code = 0;
+        let mut code = None;
         while let Some(msg) = ch.wait().await {
             match msg {
-                ChannelMsg::Data { data } => out.extend_from_slice(&data),
-                ChannelMsg::ExtendedData { data, .. } => out.extend_from_slice(&data),
-                ChannelMsg::ExitStatus { exit_status } => code = exit_status,
-                ChannelMsg::Eof | ChannelMsg::Close => {}
+                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                    if data.len() > limit.saturating_sub(out.len()) {
+                        ch.close().await?;
+                        bail!(
+                            "Remote response exceeded {} KiB. Narrow the request and retry.",
+                            limit / 1024
+                        );
+                    }
+                    out.extend_from_slice(&data);
+                }
+                ChannelMsg::Failure => bail!("The server refused the command"),
+                ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
+                ChannelMsg::Close => break,
                 _ => {}
             }
         }
-        Ok((String::from_utf8_lossy(&out).to_string(), code))
+        Ok((
+            String::from_utf8_lossy(&out).to_string(),
+            code.ok_or_else(|| {
+                anyhow!("The remote command closed without reporting its exit status")
+            })?,
+        ))
     }
 
     pub async fn sftp(&self) -> Result<russh_sftp::client::SftpSession> {
@@ -716,10 +735,21 @@ pub async fn test_connection(t: ResolvedTarget, ctx: ConnCtx) -> Result<Option<S
 pub async fn run_terminal(
     t: ResolvedTarget,
     ctx: ConnCtx,
-    mut rx: UnboundedReceiver<Input>,
+    rx: UnboundedReceiver<Input>,
     slot: Arc<Mutex<Option<Arc<SshClient>>>>,
 ) -> Result<()> {
     let client = connect(&t, &ctx).await?;
+    run_terminal_on_client(t, ctx, rx, slot, client, true).await
+}
+
+pub async fn run_terminal_on_client(
+    t: ResolvedTarget,
+    ctx: ConnCtx,
+    mut rx: UnboundedReceiver<Input>,
+    slot: Arc<Mutex<Option<Arc<SshClient>>>>,
+    client: Arc<SshClient>,
+    owns_connection: bool,
+) -> Result<()> {
     *slot.lock() = Some(client.clone());
 
     let mut channel = client.handle.channel_open_session().await?;
@@ -746,7 +776,11 @@ pub async fn run_terminal(
     channel
         .request_pty(false, &t.term_type, cols, rows, 0, 0, &[])
         .await?;
-    channel.request_shell(true).await?;
+    if let Some(command) = &t.exec_command {
+        channel.exec(true, command.clone()).await?;
+    } else {
+        channel.request_shell(true).await?;
+    }
     ctx.set_status(Status::Connected);
 
     if ctx.detect_os {
@@ -763,7 +797,11 @@ pub async fn run_terminal(
         }
     }
 
-    if let Some(script) = t.startup_script.clone().filter(|s| !s.trim().is_empty()) {
+    if let Some(script) = t
+        .startup_script
+        .clone()
+        .filter(|s| t.exec_command.is_none() && !s.trim().is_empty())
+    {
         let ch_w = channel.make_writer();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(600)).await;
@@ -803,13 +841,19 @@ pub async fn run_terminal(
                 Some(ChannelMsg::ExitSignal { signal_name, .. }) => {
                     break format!("Process killed by signal {signal_name:?}");
                 }
+                Some(ChannelMsg::Failure) => break "The server refused the terminal request".to_string(),
                 Some(ChannelMsg::Close) | None => break "Connection closed".to_string(),
                 _ => {}
             }
         }
     };
     *slot.lock() = None;
-    client.disconnect().await;
+    if let Err(error) = channel.close().await {
+        log::debug!("Closing terminal channel: {error}");
+    }
+    if owns_connection {
+        client.disconnect().await;
+    }
     ctx.info(&format!("\r\n● {reason}"));
     ctx.set_status(Status::Closed(reason));
     Ok(())

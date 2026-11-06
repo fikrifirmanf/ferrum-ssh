@@ -5,6 +5,10 @@
 //! (`--format '{{json .}}'`); `kubectl get pods` is read as whitespace-separated columns.
 //! Names and ids are validated before they are put into a command line.
 
+pub mod manager;
+pub mod ports;
+pub mod services;
+
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -69,16 +73,32 @@ pub struct Item {
     pub state: String,
     pub status: String,
     pub ports: String,
+    pub project: Option<String>,
+    pub service: Option<String>,
 }
 
 impl Item {
     pub fn key(&self) -> String {
-        format!("{}/{}", self.scope, self.name)
+        format!("{}/{}/{}", self.runtime.label(), self.scope, self.name)
+    }
+
+    pub fn terminal_command(&self, sudo: bool) -> Option<String> {
+        self.shell_command().map(|command| {
+            format!(
+                "{}{}",
+                if self.runtime == Runtime::Kubernetes {
+                    ""
+                } else {
+                    sudo_prefix(sudo)
+                },
+                command
+            )
+        })
     }
 
     pub fn is_running(&self) -> bool {
         match self.runtime {
-            Runtime::Kubernetes => self.state == "Running" || self.state == "Completed",
+            Runtime::Kubernetes => self.state == "Running",
             _ => self.state == "running",
         }
     }
@@ -107,7 +127,10 @@ impl Item {
     fn valid(&self) -> Option<()> {
         let scope_ok = match self.runtime {
             Runtime::Kubernetes => is_safe(&self.scope),
-            _ => !self.scope.is_empty() && self.scope.chars().all(|c| c.is_ascii_hexdigit()),
+            _ => {
+                (12..=64).contains(&self.scope.len())
+                    && self.scope.chars().all(|c| c.is_ascii_hexdigit())
+            }
         };
         (scope_ok && is_safe(&self.name)).then_some(())
     }
@@ -116,7 +139,9 @@ impl Item {
 /// Docker, Podman and Kubernetes names are made of these characters; refusing anything else
 /// keeps a hostile name from becoming shell syntax.
 fn is_safe(text: &str) -> bool {
-    !text.is_empty()
+    text.as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphanumeric)
         && text.len() <= 253
         && text
             .chars()
@@ -163,9 +188,10 @@ pub async fn list(client: &SshClient, sudo: bool) -> Result<Listing> {
         shell_quote(SCRIPT),
         if sudo { " sudo" } else { "" }
     );
-    let (output, _) = tokio::time::timeout(LIST_TIMEOUT, client.exec(&command))
-        .await
-        .map_err(|_| anyhow!("The server did not answer in {}s", LIST_TIMEOUT.as_secs()))??;
+    let (output, _) =
+        tokio::time::timeout(LIST_TIMEOUT, client.exec_limited(&command, 2 * 1024 * 1024))
+            .await
+            .map_err(|_| anyhow!("The server did not answer in {}s", LIST_TIMEOUT.as_secs()))??;
     Ok(parse(&output))
 }
 
@@ -182,9 +208,10 @@ pub async fn act(client: &SshClient, item: &Item, action: Action, sudo: bool) ->
         action.verb(),
         item.scope
     );
-    let (output, code) = tokio::time::timeout(ACTION_TIMEOUT, client.exec(&command))
-        .await
-        .map_err(|_| anyhow!("{} timed out", action.label()))??;
+    let (output, code) =
+        tokio::time::timeout(ACTION_TIMEOUT, client.exec_limited(&command, 64 * 1024))
+            .await
+            .map_err(|_| anyhow!("{} timed out", action.label()))??;
     if code != 0 {
         bail!("{}", last_line(&output));
     }
@@ -206,9 +233,10 @@ pub async fn logs(client: &SshClient, item: &Item, sudo: bool) -> Result<String>
             item.scope
         ),
     };
-    let (output, code) = tokio::time::timeout(LIST_TIMEOUT, client.exec(&command))
-        .await
-        .map_err(|_| anyhow!("The server did not answer in {}s", LIST_TIMEOUT.as_secs()))??;
+    let (output, code) =
+        tokio::time::timeout(LIST_TIMEOUT, client.exec_limited(&command, LOG_LIMIT))
+            .await
+            .map_err(|_| anyhow!("The server did not answer in {}s", LIST_TIMEOUT.as_secs()))??;
     if code != 0 {
         bail!("{}", last_line(&output));
     }
@@ -231,7 +259,9 @@ fn last_line(output: &str) -> String {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("the command failed")
         .trim()
-        .to_owned()
+        .chars()
+        .take(512)
+        .collect()
 }
 
 fn clip_start(text: String, limit: usize) -> String {
@@ -330,13 +360,30 @@ fn parse_container(runtime: Runtime, line: &str) -> Option<Item> {
     let name = text("Names").split(',').next()?.trim().to_owned();
     Some(Item {
         runtime,
-        // Podman prints the full id; the short one is enough for commands.
-        scope: id.chars().take(12).collect(),
+        // Preserve the runtime ID so commands and samples refer to the same container.
+        scope: id,
         name,
         detail: text("Image"),
         state: text("State").to_lowercase(),
         status: text("Status"),
         ports: text("Ports"),
+        project: compose_label(&value, "com.docker.compose.project"),
+        service: compose_label(&value, "com.docker.compose.service"),
+    })
+}
+
+fn compose_label(value: &serde_json::Value, name: &str) -> Option<String> {
+    let labels = value.get("Labels")?;
+    if let Some(labels) = labels.as_object() {
+        return labels
+            .get(name)?
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+    }
+    labels.as_str()?.split(',').find_map(|label| {
+        let (key, value) = label.split_once('=')?;
+        (key.trim() == name && !value.is_empty()).then(|| value.to_owned())
     })
 }
 
@@ -358,6 +405,8 @@ fn parse_pod(line: &str) -> Option<Item> {
             .collect::<Vec<_>>()
             .join(" "),
         ports: String::new(),
+        project: None,
+        service: None,
     })
 }
 
@@ -373,6 +422,7 @@ pub struct LogView {
 pub struct Browser {
     /// Session this state belongs to; switching panes starts over.
     pub session: u64,
+    pub manager: manager::Manager,
     pub listing: Option<Listing>,
     pub error: Option<String>,
     pub in_flight: bool,
@@ -400,6 +450,7 @@ impl Browser {
         self.in_flight = false;
         match result {
             Ok(listing) => {
+                self.manager.reconcile(&listing);
                 self.listing = Some(listing);
                 self.error = None;
             }
@@ -452,7 +503,11 @@ mod tests {
         let listing = parse(&format!("@podman\n{line}\n"));
         let item = &listing.items[0];
         assert_eq!(item.runtime, Runtime::Podman);
-        assert_eq!(item.scope, "0123456789ab");
+        assert_eq!(item.scope, "0123456789abcdef0123");
+        assert_eq!(
+            item.terminal_command(false).as_deref(),
+            Some("podman exec -it 0123456789abcdef0123 sh")
+        );
         assert_eq!(item.name, "job");
         assert_eq!(item.ports, "");
     }
@@ -509,6 +564,8 @@ mod tests {
         );
         item.name = "web; rm -rf ~".into();
         assert_eq!(item.shell_command(), None);
+        item.name = "--help".into();
+        assert_eq!(item.shell_command(), None);
         item.name = "web".into();
         item.scope = "abc$(id)".into();
         assert_eq!(item.shell_command(), None);
@@ -552,3 +609,6 @@ mod tests {
         assert_eq!(clip_start("short".into(), 100), "short");
     }
 }
+
+#[cfg(test)]
+mod transport_tests;

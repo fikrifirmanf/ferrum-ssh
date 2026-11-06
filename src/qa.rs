@@ -421,6 +421,60 @@ impl App {
                     }
                 }
             }
+            "sync" => {
+                let root = std::env::temp_dir().join("ferrum-qa-sync");
+                let source = root.join("source");
+                let destination = root.join("destination");
+                let setup = (|| -> std::io::Result<()> {
+                    std::fs::create_dir_all(source.join("releases"))?;
+                    std::fs::create_dir_all(&destination)?;
+                    std::fs::write(source.join("deploy.sh"), "echo ready\n")?;
+                    std::fs::write(source.join("releases/version.txt"), "0.4.0\n")?;
+                    std::fs::write(destination.join("deploy.sh"), "echo old\n")?;
+                    std::fs::write(destination.join("obsolete.txt"), "old\n")?;
+                    Ok(())
+                })();
+                if let Err(error) = setup {
+                    log::warn!("Sync QA fixtures: {error}");
+                    return;
+                }
+                let mut left = crate::app::FsPane::new();
+                let mut right = crate::app::FsPane::new();
+                left.backend = Some(crate::sftp::Backend::Local);
+                right.backend = Some(crate::sftp::Backend::Local);
+                let (left_id, right_id) = (left.id, right.id);
+                let id = crate::conn::next_id();
+                self.tabs.push(Tab::Sftp(crate::app::SftpTab {
+                    sync: None,
+                    id,
+                    title: "File transfer".into(),
+                    left,
+                    right,
+                }));
+                self.active_tab = Some(id);
+                self.fs_navigate(left_id, source.to_string_lossy().into());
+                self.fs_navigate(right_id, destination.to_string_lossy().into());
+            }
+            "syncpreview" => {
+                let Some(Tab::Sftp(tab)) = self.tabs.last_mut() else {
+                    return;
+                };
+                let (Some(left), Some(right)) = (&tab.left.backend, &tab.right.backend) else {
+                    return;
+                };
+                let mut dialog = crate::ui::sync_view::SyncDialog::new(
+                    crate::sftp::sync::Location {
+                        backend: left.clone(),
+                        path: tab.left.path.clone(),
+                    },
+                    crate::sftp::sync::Location {
+                        backend: right.clone(),
+                        path: tab.right.path.clone(),
+                    },
+                );
+                dialog.compare(self.rt.handle(), &self.bridge.ctx);
+                tab.sync = Some(dialog);
+            }
             "sftp" => {
                 let directory = std::env::temp_dir().join("ferrum-qa-files");
                 if let Err(error) = std::fs::create_dir_all(directory.join("releases")) {
@@ -442,6 +496,7 @@ impl App {
                 let mut right = crate::app::FsPane::new();
                 right.host_picker = true;
                 self.tabs.push(Tab::Sftp(crate::app::SftpTab {
+                    sync: None,
                     id,
                     title: "File transfer".into(),
                     left,
@@ -570,6 +625,139 @@ impl App {
                     .and_then(|id| self.tabs.iter_mut().find(|t| t.id() == id))
                 {
                     t.side_panel = Some(crate::app::SidePanel::Health);
+                }
+            }
+            "containermanager" => {
+                self.open_target(self.local_target());
+                let Some(Tab::Terminal(tab)) = self.tabs.last_mut() else {
+                    return;
+                };
+                let pane = &mut tab.panes[0];
+                pane.session.target.protocol = Protocol::Ssh;
+                pane.session.target.label = "Demo / build-node".into();
+                *pane.session.status.lock() = crate::conn::Status::Connected;
+                let mut browser = crate::containers::Browser::default();
+                browser.session = pane.session.id;
+                browser.last_poll = f64::MAX;
+                browser.listing = Some(crate::containers::parse(
+                    r#"@docker
+{"ID":"abcdef123456","Names":"shop-api-1","Image":"ghcr.io/example/api:2026.11","State":"running","Status":"Up 2 hours (healthy)","Ports":"127.0.0.1:8080->8080/tcp","Labels":"com.docker.compose.project=shop,com.docker.compose.service=api"}
+{"ID":"112233445566","Names":"shop-worker-1","Image":"ghcr.io/example/worker:2026.11","State":"running","Status":"Up 2 hours (healthy)","Labels":"com.docker.compose.project=shop,com.docker.compose.service=worker"}
+{"ID":"aabbccddeeff","Names":"shop-db-1","Image":"postgres:17","State":"running","Status":"Up 2 days (healthy)","Ports":"5432/tcp","Labels":"com.docker.compose.project=shop,com.docker.compose.service=db"}
+{"ID":"8899aabbccdd","Names":"old-migration","Image":"alpine:3.21","State":"exited","Status":"Exited (0) 3 days ago"}
+"#,
+                ));
+                browser.manager.open = true;
+                let items = browser
+                    .listing
+                    .as_ref()
+                    .map(|l| l.items.clone())
+                    .unwrap_or_default();
+                for n in 0..18 {
+                    let samples = items
+                        .iter()
+                        .filter(|i| i.is_running())
+                        .enumerate()
+                        .map(|(i, item)| {
+                            (
+                                item.key(),
+                                crate::containers::manager::Stats {
+                                    cpu: Some((n % 7) as f64 * 2.5 + i as f64 * 3.0 + 4.0),
+                                    memory_percent: Some(20.0 + n as f64 * 0.4 + i as f64 * 8.0),
+                                    memory: format!("{} MiB / 1 GiB", 200 + n * 4 + i * 80),
+                                    network: "24 MB / 8 MB".into(),
+                                    disk: "12 MB / 4 MB".into(),
+                                    pids: "12".into(),
+                                },
+                            )
+                        })
+                        .collect();
+                    browser.manager.apply_stats(Ok(samples));
+                }
+                if let Some(item) = items.first() {
+                    browser.manager.select(item.key());
+                }
+                browser.manager.logs = Some(Ok("2026-11-06T08:40:01Z INFO  Listening on :8080\n2026-11-06T08:40:02Z INFO  Database connection ready\n2026-11-06T08:40:12Z INFO  GET /health 200 1ms\n2026-11-06T08:40:14Z INFO  GET /api/orders 200 12ms\n2026-11-06T08:40:18Z WARN  Queue latency above 250ms\n2026-11-06T08:40:21Z INFO  Worker recovered\n".into()));
+                browser.manager.logs_updated = Some(std::time::Instant::now());
+                browser.manager.inspect = Some(Ok(serde_json::to_string_pretty(&serde_json::json!({"image":"ghcr.io/example/api:2026.11", "state":"running", "ports":{"8080/tcp":[{"HostIp":"127.0.0.1", "HostPort":"8080"}]}})).unwrap_or_default()));
+                browser.manager.last_stats_poll = f64::MAX;
+                browser.manager.last_detail_poll = f64::MAX;
+                tab.containers = browser;
+            }
+            "connectionscroll" => {
+                if let Some(qa) = &mut self.qa {
+                    qa.keys
+                        .push(egui::Event::PointerMoved(egui::pos2(500.0, 350.0)));
+                    qa.keys.push(egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -3000.0),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Wheel,
+                        modifiers: Default::default(),
+                    });
+                }
+            }
+            #[cfg(debug_assertions)]
+            "containerconnection" => {
+                if let Some(Tab::Terminal(tab)) = self.tabs.last_mut() {
+                    if let Some(item) = tab.containers.listing.as_ref().and_then(|l| {
+                        l.items
+                            .iter()
+                            .find(|item| item.detail.starts_with("postgres:"))
+                    }) {
+                        let key = item.key();
+                        tab.containers.manager.select(key.clone());
+                        let port = crate::containers::ports::PublishedPort {
+                            container_port: 5432,
+                            protocol: "tcp".into(),
+                            host: std::net::Ipv4Addr::LOCALHOST.into(),
+                            host_port: 5432,
+                        };
+                        let mut tunnel = crate::containers::ports::Tunnel::qa_demo(
+                            self.rt.handle(),
+                            key.clone(),
+                            port.clone(),
+                        );
+                        tunnel.connection.user = "app_reader".into();
+                        tunnel.connection.password = "demo-password-only".into();
+                        tunnel.connection.database = "analytics".into();
+                        tab.containers
+                            .manager
+                            .tunnels
+                            .insert(port.key(&key), tunnel);
+                        tab.containers.manager.ports = Some(Ok(vec![port]));
+                        tab.containers
+                            .manager
+                            .choose_tab(crate::containers::manager::DetailTab::Ports);
+                        tab.containers.manager.focus_details = true;
+                        tab.containers.manager.last_detail_poll = f64::MAX;
+                    }
+                }
+            }
+            "containerports" => {
+                if let Some(Tab::Terminal(tab)) = self.tabs.last_mut() {
+                    tab.containers
+                        .manager
+                        .choose_tab(crate::containers::manager::DetailTab::Ports);
+                    tab.containers.manager.focus_details = true;
+                    tab.containers.manager.ports = Some(crate::containers::ports::parse(r#"{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"},{"HostIp":"::","HostPort":"8080"}],"5353/udp":[{"HostIp":"0.0.0.0","HostPort":"5353"}]}"#).map_err(|error| error.to_string()));
+                    tab.containers.manager.last_detail_poll = f64::MAX;
+                }
+            }
+            "containerstats" | "containerinspect" | "containerlist" => {
+                if let Some(Tab::Terminal(tab)) = self.tabs.last_mut() {
+                    if step == "containerlist" {
+                        tab.containers.manager.focus_details = false;
+                    } else {
+                        tab.containers.manager.focus_details = true;
+                        tab.containers
+                            .manager
+                            .choose_tab(if step == "containerstats" {
+                                crate::containers::manager::DetailTab::Stats
+                            } else {
+                                crate::containers::manager::DetailTab::Inspect
+                            });
+                    }
                 }
             }
             "containers" => {

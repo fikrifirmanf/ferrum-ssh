@@ -25,6 +25,51 @@ enum TermAction {
         sudo: bool,
         client: std::sync::Arc<crate::conn::ssh::SshClient>,
     },
+    ContainerResources {
+        tab: u64,
+        session: u64,
+        sudo: bool,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        listing: crate::containers::Listing,
+    },
+    ContainerDetail {
+        tab: u64,
+        session: u64,
+        sudo: bool,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        item: crate::containers::Item,
+        sequence: u64,
+        detail: crate::containers::manager::DetailTab,
+    },
+    ContainerCredentials {
+        tab: u64,
+        session: u64,
+        key: String,
+        item: crate::containers::Item,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        sudo: bool,
+    },
+    ContainerOpenPort {
+        tab: u64,
+        session: u64,
+        item: crate::containers::Item,
+        port: crate::containers::ports::PublishedPort,
+        mode: crate::containers::ports::OpenAs,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        sudo: bool,
+    },
+    ContainerBrowser {
+        tab: u64,
+        session: u64,
+        key: String,
+        url: String,
+    },
+    ContainerTerminal {
+        target: crate::model::ResolvedTarget,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        item: crate::containers::Item,
+        sudo: bool,
+    },
     ContainerAct {
         tab: u64,
         session: u64,
@@ -256,7 +301,7 @@ impl App {
             });
 
         // ---------- Server health polling ----------
-        if tab.side_panel == Some(SidePanel::Health) {
+        if tab.side_panel == Some(SidePanel::Health) && !tab.containers.manager.open {
             if let Some(pane) = tab.panes.get(tab.active) {
                 let session = &pane.session;
                 if tab.health.session != session.id {
@@ -283,11 +328,13 @@ impl App {
         }
 
         // ---------- Container polling ----------
-        if tab.side_panel == Some(SidePanel::Containers) {
+        if tab.side_panel == Some(SidePanel::Containers) || tab.containers.manager.open {
             if let Some(pane) = tab.panes.get(tab.active) {
                 let session = &pane.session;
                 if tab.containers.session != session.id {
+                    let open = tab.containers.manager.open;
                     tab.containers.reset(session.id);
+                    tab.containers.manager.open = open;
                 }
                 let now = ui.input(|i| i.time);
                 if !tab.containers.in_flight
@@ -307,11 +354,74 @@ impl App {
                         });
                     }
                 }
+                if tab.containers.manager.open
+                    && session.is_live()
+                    && session.target.protocol == crate::model::Protocol::Ssh
+                {
+                    if let Some(client) = session.ssh.lock().clone() {
+                        let manager = &mut tab.containers.manager;
+                        if !manager.stats_pending
+                            && now - manager.last_stats_poll >= CONTAINER_INTERVAL
+                        {
+                            if let Some(listing) = &tab.containers.listing {
+                                manager.stats_pending = true;
+                                manager.last_stats_poll = now;
+                                actions.push(TermAction::ContainerResources {
+                                    tab: tab_id,
+                                    session: session.id,
+                                    sudo: tab.containers.use_sudo,
+                                    client: client.clone(),
+                                    listing: listing.clone(),
+                                });
+                            }
+                        }
+                        if let Some(item) = tab
+                            .containers
+                            .listing
+                            .as_ref()
+                            .and_then(|list| {
+                                list.items
+                                    .iter()
+                                    .find(|item| manager.selected.as_deref() == Some(&item.key()))
+                            })
+                            .cloned()
+                        {
+                            use crate::containers::manager::DetailTab;
+                            let due = match manager.tab {
+                                DetailTab::Logs => {
+                                    !manager.pause_logs && now - manager.last_detail_poll >= 2.0
+                                }
+                                DetailTab::Ports => {
+                                    item.runtime != crate::containers::Runtime::Kubernetes
+                                        && manager.ports.is_none()
+                                }
+                                DetailTab::Inspect => {
+                                    item.runtime != crate::containers::Runtime::Kubernetes
+                                        && manager.inspect.is_none()
+                                }
+                                _ => false,
+                            };
+                            if due && manager.detail_pending.is_none() {
+                                let detail = manager.tab;
+                                let sequence = manager.begin_detail(now);
+                                actions.push(TermAction::ContainerDetail {
+                                    tab: tab_id,
+                                    session: session.id,
+                                    sudo: tab.containers.use_sudo,
+                                    client,
+                                    item,
+                                    sequence,
+                                    detail,
+                                });
+                            }
+                        }
+                    }
+                }
             }
         }
 
         // ---------- Side panel ----------
-        if let Some(panel) = tab.side_panel {
+        if let Some(panel) = tab.side_panel.filter(|_| !tab.containers.manager.open) {
             // The terminal reflows once when the panel opens; only the panel's contents fade in,
             // because terminal text must never animate.
             let enter = motion::since_change(
@@ -405,6 +515,7 @@ impl App {
                             let sudo = tab.containers.use_sudo;
                             let client = pane.session.ssh.lock().clone();
                             match (command, client) {
+                                (Command::OpenManager, _) => { tab.containers.manager.open = true; tab.containers.manager.last_stats_poll = f64::NEG_INFINITY; },
                                 (Command::Shell(text), _) => pane.session.send_text(&text),
                                 (Command::UseSudo, _) => {
                                     tab.containers.use_sudo = true;
@@ -469,67 +580,150 @@ impl App {
                 });
         }
 
-        if tab.broadcast && tab.panes.len() > 1 {
-            egui::Panel::top(egui::Id::unique(("broadcast-warning", tab_id)))
+        if tab.containers.manager.open {
+            egui::CentralPanel::default()
                 .frame(
                     egui::Frame::new()
-                        .fill(pal.panel)
-                        .inner_margin(egui::Margin::symmetric(16, 8)),
+                        .fill(pal.bg)
+                        .inner_margin(egui::Margin::same(16)),
                 )
                 .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "{} Broadcast input: {}",
-                                crate::icons::BROADCAST,
-                                tab.panes
-                                    .iter()
-                                    .map(|p| p.session.target.label.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ))
-                            .color(pal.warning),
-                        );
-                        if ui
-                            .add(forms::Btn::secondary("Stop broadcast").small())
-                            .clicked()
+                    let source = match tab.panes.get(tab.active) {
+                        Some(pane)
+                            if pane.session.target.protocol != crate::model::Protocol::Ssh =>
                         {
-                            tab.broadcast = false;
+                            super::container_view::Source::Unsupported
                         }
-                    });
-                });
-        }
-        // ---------- Panes ----------
-        let mut close_pane = None;
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(pal.well))
-            .show(ui, |ui| {
-                let area = ui.available_rect_before_wrap();
-                let rects = pane_rects(area, tab.panes.len(), tab.layout);
-                let multi = tab.panes.len() > 1;
-                let mut broadcast_bytes: Vec<u8> = vec![];
-                let mut direct: Vec<(usize, Vec<u8>)> = vec![];
-                let mut new_active = None;
-                for (i, (pane, rect)) in tab.panes.iter_mut().zip(rects.iter()).enumerate() {
-                    let (scheme, font) = {
-                        let s = &settings;
-                        let sc = crate::themes::scheme_by_name(
-                            pane.session
-                                .target
-                                .color_scheme
-                                .as_deref()
-                                .unwrap_or(&s.terminal_scheme),
-                        );
-                        (
-                            sc,
-                            egui::FontId::new(
-                                pane.session.target.font_size.unwrap_or(s.font_size),
-                                crate::fonts::terminal_family(),
-                            ),
-                        )
+                        Some(pane) if !pane.session.is_live() => {
+                            super::container_view::Source::Disconnected(&pane.session.target.label)
+                        }
+                        Some(pane) => {
+                            super::container_view::Source::Ssh(&pane.session.target.label)
+                        }
+                        None => super::container_view::Source::Unsupported,
                     };
-                    let suggestion =
-                        if settings.autocomplete && i == tab.active && !pane.session.line_untracked
+                    let command =
+                        super::container_manager::show(ui, pal, &mut tab.containers, source);
+                    if let (Some(command), Some(pane)) = (command, tab.panes.get(tab.active)) {
+                        if let Some(client) = pane.session.ssh.lock().clone() {
+                            match command {
+                                super::container_manager::Command::Action(item, action) => {
+                                    tab.containers.busy =
+                                        Some(format!("{} {}…", action.label(), item.name));
+                                    tab.containers.notice = None;
+                                    actions.push(TermAction::ContainerAct {
+                                        tab: tab_id,
+                                        session: pane.session.id,
+                                        sudo: tab.containers.use_sudo,
+                                        client,
+                                        item,
+                                        action,
+                                    });
+                                }
+                                super::container_manager::Command::OpenPort(item, port, mode) => {
+                                    actions.push(TermAction::ContainerOpenPort {
+                                        tab: tab_id,
+                                        session: pane.session.id,
+                                        item,
+                                        port,
+                                        mode,
+                                        client,
+                                        sudo: tab.containers.use_sudo,
+                                    });
+                                }
+                                super::container_manager::Command::ReadCredentials(key, item) => {
+                                    actions.push(TermAction::ContainerCredentials {
+                                        tab: tab_id,
+                                        session: pane.session.id,
+                                        key,
+                                        item,
+                                        client,
+                                        sudo: tab.containers.use_sudo,
+                                    });
+                                }
+                                super::container_manager::Command::Browser { key, url } => {
+                                    actions.push(TermAction::ContainerBrowser {
+                                        tab: tab_id,
+                                        session: pane.session.id,
+                                        key,
+                                        url,
+                                    });
+                                }
+                                super::container_manager::Command::Terminal(item) => {
+                                    actions.push(TermAction::ContainerTerminal {
+                                        target: pane.session.target.clone(),
+                                        client,
+                                        item,
+                                        sudo: tab.containers.use_sudo,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                });
+        } else {
+            if tab.broadcast && tab.panes.len() > 1 {
+                egui::Panel::top(egui::Id::unique(("broadcast-warning", tab_id)))
+                    .frame(
+                        egui::Frame::new()
+                            .fill(pal.panel)
+                            .inner_margin(egui::Margin::symmetric(16, 8)),
+                    )
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} Broadcast input: {}",
+                                    crate::icons::BROADCAST,
+                                    tab.panes
+                                        .iter()
+                                        .map(|p| p.session.target.label.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ))
+                                .color(pal.warning),
+                            );
+                            if ui
+                                .add(forms::Btn::secondary("Stop broadcast").small())
+                                .clicked()
+                            {
+                                tab.broadcast = false;
+                            }
+                        });
+                    });
+            }
+            // ---------- Panes ----------
+            let mut close_pane = None;
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(pal.well))
+                .show(ui, |ui| {
+                    let area = ui.available_rect_before_wrap();
+                    let rects = pane_rects(area, tab.panes.len(), tab.layout);
+                    let multi = tab.panes.len() > 1;
+                    let mut broadcast_bytes: Vec<u8> = vec![];
+                    let mut direct: Vec<(usize, Vec<u8>)> = vec![];
+                    let mut new_active = None;
+                    for (i, (pane, rect)) in tab.panes.iter_mut().zip(rects.iter()).enumerate() {
+                        let (scheme, font) = {
+                            let s = &settings;
+                            let sc = crate::themes::scheme_by_name(
+                                pane.session
+                                    .target
+                                    .color_scheme
+                                    .as_deref()
+                                    .unwrap_or(&s.terminal_scheme),
+                            );
+                            (
+                                sc,
+                                egui::FontId::new(
+                                    pane.session.target.font_size.unwrap_or(s.font_size),
+                                    crate::fonts::terminal_family(),
+                                ),
+                            )
+                        };
+                        let suggestion = if settings.autocomplete
+                            && i == tab.active
+                            && !pane.session.line_untracked
                         {
                             crate::suggest::suggest(
                                 &pane.session.line_buf,
@@ -540,203 +734,228 @@ impl App {
                         } else {
                             None
                         };
-                    let cfg = ViewConfig {
-                        scheme: &scheme,
-                        font,
-                        line_height: settings.line_height,
-                        cursor_shape: settings.cursor_shape,
-                        cursor_blink: settings.cursor_blink,
-                        keywords: &keywords,
-                        copy_on_select: settings.copy_on_select,
-                        right_click_paste: settings.right_click_paste,
-                        option_is_meta: settings.option_is_meta,
-                        brighten_bold: settings.brighten_bold,
-                        suggestion,
-                        focused: i == tab.active && !modal_open,
-                    };
-                    let backspace = pane.session.target.backspace;
-                    let mut child = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(*rect)
-                            .id_salt(("pane", pane.session.id)),
-                    );
-                    let out = term_view::show(
-                        &mut child,
-                        &mut pane.session,
-                        &mut pane.view,
-                        &cfg,
-                        backspace,
-                    );
-                    if multi {
-                        // The active pane wears the heat line along its top edge.
-                        let heat = motion::ease(
-                            ui.ctx(),
-                            egui::Id::unique(("pane-heat", pane.session.id)),
-                            i == tab.active,
-                            motion::HEAT,
-                        );
-                        ui.painter().rect_stroke(
-                            *rect,
-                            0.0,
-                            Stroke::new(1.0, pal.border),
-                            egui::StrokeKind::Inside,
-                        );
-                        if heat > 0.0 {
-                            let half = rect.width() / 2.0 * heat;
-                            ui.painter().hline(
-                                (rect.center().x - half)..=(rect.center().x + half),
-                                rect.top() + 1.0,
-                                Stroke::new(2.0, pal.accent),
-                            );
-                        }
-                    }
-                    if out.clicked {
-                        new_active = Some(i);
-                    }
-                    if !out.input.is_empty() {
-                        if tab.broadcast && multi {
-                            broadcast_bytes.extend(out.input);
-                        } else {
-                            direct.push((i, out.input));
-                        }
-                    }
-                    if let Some(line) = out.entered_line {
-                        actions.push(TermAction::History(line, pane.session.target.label.clone()));
-                    }
-                    if let Some(c) = out.copied {
-                        actions.push(TermAction::Copy(c));
-                    }
-                    if let Some(u) = out.open_url {
-                        actions.push(TermAction::OpenUrl(u));
-                    }
-                    match out.context {
-                        Some(ContextAction::SplitRight) => {
-                            actions.push(TermAction::Split(SplitLayout::Horizontal))
-                        }
-                        Some(ContextAction::SplitDown) => {
-                            actions.push(TermAction::Split(SplitLayout::Vertical))
-                        }
-                        Some(ContextAction::ClosePane) => close_pane = Some(i),
-                        Some(ContextAction::OpenSftp) => {
-                            actions.push(TermAction::OpenSftp(pane.session.target.host_id))
-                        }
-                        Some(ContextAction::Clear) => pane.session.send(b"\x0c".to_vec()),
-                        Some(ContextAction::Find) => pane.view.search_open = true,
-                        Some(ContextAction::SelectAll) => {
-                            let mut t = pane.session.term.lock();
-                            let grid = t.term.grid();
-                            let top = alacritty_terminal::index::Point::new(
-                                alacritty_terminal::index::Line(
-                                    -(alacritty_terminal::grid::Dimensions::history_size(grid)
-                                        as i32),
-                                ),
-                                alacritty_terminal::index::Column(0),
-                            );
-                            let bottom = alacritty_terminal::index::Point::new(
-                                alacritty_terminal::index::Line(
-                                    alacritty_terminal::grid::Dimensions::screen_lines(grid) as i32
-                                        - 1,
-                                ),
-                                alacritty_terminal::index::Column(
-                                    alacritty_terminal::grid::Dimensions::columns(grid) - 1,
-                                ),
-                            );
-                            let mut sel = alacritty_terminal::selection::Selection::new(
-                                alacritty_terminal::selection::SelectionType::Simple,
-                                top,
-                                alacritty_terminal::index::Side::Left,
-                            );
-                            sel.update(bottom, alacritty_terminal::index::Side::Right);
-                            t.term.selection = Some(sel);
-                        }
-                        None => {}
-                    }
-                    // Disconnected banner.
-                    let st = pane.session.status.lock().clone();
-                    if let Status::Closed(reason) | Status::Failed(reason) = &st {
-                        let banner = Rect::from_min_size(
-                            Pos2::new(rect.left() + 12.0, rect.bottom() - 52.0),
-                            Vec2::new(rect.width() - 24.0, 40.0),
-                        );
-                        let mut bui = ui.new_child(
+                        let cfg = ViewConfig {
+                            scheme: &scheme,
+                            font,
+                            line_height: settings.line_height,
+                            cursor_shape: settings.cursor_shape,
+                            cursor_blink: settings.cursor_blink,
+                            keywords: &keywords,
+                            copy_on_select: settings.copy_on_select,
+                            right_click_paste: settings.right_click_paste,
+                            option_is_meta: settings.option_is_meta,
+                            brighten_bold: settings.brighten_bold,
+                            suggestion,
+                            focused: i == tab.active && !modal_open,
+                        };
+                        let backspace = pane.session.target.backspace;
+                        let mut child = ui.new_child(
                             egui::UiBuilder::new()
-                                .max_rect(banner)
-                                .id_salt(("banner", pane.session.id)),
+                                .max_rect(*rect)
+                                .id_salt(("pane", pane.session.id)),
                         );
-                        egui::Frame::new()
-                            .fill(pal.panel)
-                            .stroke(Stroke::new(
-                                1.0,
-                                if matches!(st, Status::Failed(_)) {
-                                    pal.danger
-                                } else {
-                                    pal.border
-                                },
-                            ))
-                            .corner_radius(CornerRadius::same(10))
-                            .inner_margin(egui::Margin::symmetric(12, 6))
-                            .show(&mut bui, |ui| {
-                                ui.horizontal(|ui| {
-                                    let short: String = reason.chars().take(90).collect();
-                                    ui.label(RichText::new(short).color(pal.text_dim));
-                                    if let Some(at) = pane.session.reconnect_at {
-                                        let left = (at - ui.input(|i| i.time)).max(0.0);
-                                        ui.label(
-                                            RichText::new(format!("reconnecting in {:.0}s", left))
+                        let out = term_view::show(
+                            &mut child,
+                            &mut pane.session,
+                            &mut pane.view,
+                            &cfg,
+                            backspace,
+                        );
+                        if multi {
+                            // The active pane wears the heat line along its top edge.
+                            let heat = motion::ease(
+                                ui.ctx(),
+                                egui::Id::unique(("pane-heat", pane.session.id)),
+                                i == tab.active,
+                                motion::HEAT,
+                            );
+                            ui.painter().rect_stroke(
+                                *rect,
+                                0.0,
+                                Stroke::new(1.0, pal.border),
+                                egui::StrokeKind::Inside,
+                            );
+                            if heat > 0.0 {
+                                let half = rect.width() / 2.0 * heat;
+                                ui.painter().hline(
+                                    (rect.center().x - half)..=(rect.center().x + half),
+                                    rect.top() + 1.0,
+                                    Stroke::new(2.0, pal.accent),
+                                );
+                            }
+                        }
+                        if out.clicked {
+                            new_active = Some(i);
+                        }
+                        if !out.input.is_empty() {
+                            if tab.broadcast && multi {
+                                broadcast_bytes.extend(out.input);
+                            } else {
+                                direct.push((i, out.input));
+                            }
+                        }
+                        if let Some(line) = out.entered_line {
+                            actions
+                                .push(TermAction::History(line, pane.session.target.label.clone()));
+                        }
+                        if let Some(c) = out.copied {
+                            actions.push(TermAction::Copy(c));
+                        }
+                        if let Some(u) = out.open_url {
+                            actions.push(TermAction::OpenUrl(u));
+                        }
+                        match out.context {
+                            Some(ContextAction::SplitRight) => {
+                                actions.push(TermAction::Split(SplitLayout::Horizontal))
+                            }
+                            Some(ContextAction::SplitDown) => {
+                                actions.push(TermAction::Split(SplitLayout::Vertical))
+                            }
+                            Some(ContextAction::ClosePane) => close_pane = Some(i),
+                            Some(ContextAction::OpenSftp) => {
+                                actions.push(TermAction::OpenSftp(pane.session.target.host_id))
+                            }
+                            Some(ContextAction::Clear) => pane.session.send(b"\x0c".to_vec()),
+                            Some(ContextAction::Find) => pane.view.search_open = true,
+                            Some(ContextAction::SelectAll) => {
+                                let mut t = pane.session.term.lock();
+                                let grid = t.term.grid();
+                                let top = alacritty_terminal::index::Point::new(
+                                    alacritty_terminal::index::Line(
+                                        -(alacritty_terminal::grid::Dimensions::history_size(grid)
+                                            as i32),
+                                    ),
+                                    alacritty_terminal::index::Column(0),
+                                );
+                                let bottom = alacritty_terminal::index::Point::new(
+                                    alacritty_terminal::index::Line(
+                                        alacritty_terminal::grid::Dimensions::screen_lines(grid)
+                                            as i32
+                                            - 1,
+                                    ),
+                                    alacritty_terminal::index::Column(
+                                        alacritty_terminal::grid::Dimensions::columns(grid) - 1,
+                                    ),
+                                );
+                                let mut sel = alacritty_terminal::selection::Selection::new(
+                                    alacritty_terminal::selection::SelectionType::Simple,
+                                    top,
+                                    alacritty_terminal::index::Side::Left,
+                                );
+                                sel.update(bottom, alacritty_terminal::index::Side::Right);
+                                t.term.selection = Some(sel);
+                            }
+                            None => {}
+                        }
+                        // Disconnected banner.
+                        let st = pane.session.status.lock().clone();
+                        if let Status::Closed(reason) | Status::Failed(reason) = &st {
+                            let banner = Rect::from_min_size(
+                                Pos2::new(rect.left() + 12.0, rect.bottom() - 52.0),
+                                Vec2::new(rect.width() - 24.0, 40.0),
+                            );
+                            let mut bui = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(banner)
+                                    .id_salt(("banner", pane.session.id)),
+                            );
+                            egui::Frame::new()
+                                .fill(pal.panel)
+                                .stroke(Stroke::new(
+                                    1.0,
+                                    if matches!(st, Status::Failed(_)) {
+                                        pal.danger
+                                    } else {
+                                        pal.border
+                                    },
+                                ))
+                                .corner_radius(CornerRadius::same(10))
+                                .inner_margin(egui::Margin::symmetric(12, 6))
+                                .show(&mut bui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        let short: String = reason.chars().take(90).collect();
+                                        ui.label(RichText::new(short).color(pal.text_dim));
+                                        if let Some(at) = pane.session.reconnect_at {
+                                            let left = (at - ui.input(|i| i.time)).max(0.0);
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "reconnecting in {:.0}s",
+                                                    left
+                                                ))
                                                 .small()
                                                 .color(pal.warning),
+                                            );
+                                        }
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if ui.button("Close").clicked() {
+                                                    close_pane = Some(i);
+                                                }
+                                                if ui
+                                                    .add(super::primary_button(
+                                                        "\u{E036} Reconnect",
+                                                        pal,
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    actions.push(TermAction::Reconnect(
+                                                        pane.session.id,
+                                                    ));
+                                                }
+                                            },
                                         );
-                                    }
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if ui.button("Close").clicked() {
-                                                close_pane = Some(i);
-                                            }
-                                            if ui
-                                                .add(super::primary_button(
-                                                    "\u{E036} Reconnect",
-                                                    pal,
-                                                ))
-                                                .clicked()
-                                            {
-                                                actions
-                                                    .push(TermAction::Reconnect(pane.session.id));
-                                            }
-                                        },
-                                    );
+                                    });
                                 });
-                            });
-                        // Enter reconnects too.
-                        if i == tab.active
-                            && !modal_open
-                            && ui.input(|inp| inp.key_pressed(egui::Key::Enter))
-                            && pane.session.reconnect_at.is_none()
-                        {
-                            actions.push(TermAction::Reconnect(pane.session.id));
+                            // Enter reconnects too.
+                            if i == tab.active
+                                && !modal_open
+                                && ui.input(|inp| inp.key_pressed(egui::Key::Enter))
+                                && pane.session.reconnect_at.is_none()
+                            {
+                                actions.push(TermAction::Reconnect(pane.session.id));
+                            }
                         }
                     }
-                }
-                if let Some(a) = new_active {
-                    tab.active = a;
-                }
-                if !broadcast_bytes.is_empty() {
-                    for p in tab.panes.iter() {
-                        if p.session.is_live() {
-                            p.session.send(broadcast_bytes.clone());
+                    if let Some(a) = new_active {
+                        tab.active = a;
+                    }
+                    if !broadcast_bytes.is_empty() {
+                        for p in tab.panes.iter() {
+                            if p.session.is_live() {
+                                p.session.send(broadcast_bytes.clone());
+                            }
                         }
                     }
-                }
-                for (i, bytes) in direct {
-                    if let Some(p) = tab.panes.get(i) {
-                        p.session.send(bytes);
+                    for (i, bytes) in direct {
+                        if let Some(p) = tab.panes.get(i) {
+                            p.session.send(bytes);
+                        }
                     }
-                }
-            });
-        if let Some(i) = close_pane {
-            actions.push(TermAction::ClosePane(i));
+                });
+            if let Some(i) = close_pane {
+                actions.push(TermAction::ClosePane(i));
+            }
         }
 
+        if let Some(pane) = tab
+            .panes
+            .get(tab.active)
+            .filter(|pane| pane.session.is_live())
+        {
+            for (key, tunnel) in &mut tab.containers.manager.tunnels {
+                if let Some(url) = tunnel.take_browser_url() {
+                    actions.push(TermAction::ContainerBrowser {
+                        tab: tab_id,
+                        session: pane.session.id,
+                        key: key.clone(),
+                        url,
+                    });
+                }
+            }
+        }
+
+        // unslop-ignore N_PLUS_ONE_IN_LOOP -- Dispatch distinct UI actions; this is not a per-row DB/HTTP query loop.
         for a in actions {
             match a {
                 TermAction::Split(l) => self.split_active(l),
@@ -813,6 +1032,211 @@ impl App {
                             result,
                         });
                     });
+                }
+                TermAction::ContainerResources {
+                    tab,
+                    session,
+                    sudo,
+                    client,
+                    listing,
+                } => {
+                    let bridge = self.bridge.clone();
+                    self.rt.spawn(async move {
+                        let result = crate::containers::manager::stats(&client, &listing, sudo)
+                            .await
+                            .map_err(|error| error.to_string());
+                        bridge.send(AppEvent::ContainerResources {
+                            tab,
+                            session,
+                            result,
+                        });
+                    });
+                }
+                TermAction::ContainerDetail {
+                    tab,
+                    session,
+                    sudo,
+                    client,
+                    item,
+                    sequence,
+                    detail,
+                } => {
+                    let bridge = self.bridge.clone();
+                    self.rt.spawn(async move {
+                        let result = match detail {
+                            crate::containers::manager::DetailTab::Logs => {
+                                crate::containers::logs(&client, &item, sudo).await
+                            }
+                            crate::containers::manager::DetailTab::Ports => {
+                                crate::containers::ports::fetch(&client, &item, sudo).await
+                            }
+                            crate::containers::manager::DetailTab::Inspect => {
+                                crate::containers::manager::inspect(&client, &item, sudo).await
+                            }
+                            _ => return,
+                        }
+                        .map_err(|error| error.to_string());
+                        bridge.send(AppEvent::ContainerDetail {
+                            tab,
+                            session,
+                            key: item.key(),
+                            sequence,
+                            detail,
+                            result,
+                        });
+                    });
+                }
+                TermAction::ContainerCredentials {
+                    tab,
+                    session,
+                    key,
+                    item,
+                    client,
+                    sudo,
+                } => {
+                    if let Some(Tab::Terminal(source)) =
+                        self.tabs.iter_mut().find(|t| t.id() == tab)
+                    {
+                        if source.containers.session == session {
+                            if let Some(tunnel) = source.containers.manager.tunnels.get_mut(&key) {
+                                tunnel.read_credentials(
+                                    self.rt.handle(),
+                                    client,
+                                    item,
+                                    sudo,
+                                    ui.ctx().clone(),
+                                );
+                            }
+                        }
+                    }
+                }
+                TermAction::ContainerOpenPort {
+                    tab,
+                    session,
+                    item,
+                    port,
+                    mode,
+                    client,
+                    sudo,
+                } => {
+                    if let Some(Tab::Terminal(source)) =
+                        self.tabs.iter_mut().find(|t| t.id() == tab)
+                    {
+                        if source.containers.session != session {
+                            continue;
+                        }
+                        let tunnels = &mut source.containers.manager.tunnels;
+                        let key = port.key(&item.key());
+                        if tunnels.get(&key).is_some_and(|t| {
+                            matches!(
+                                t.status(),
+                                crate::containers::ports::TunnelStatus::Starting
+                                    | crate::containers::ports::TunnelStatus::Ready(_)
+                            )
+                        }) {
+                            continue;
+                        }
+                        tunnels.retain(|_, t| {
+                            matches!(
+                                t.status(),
+                                crate::containers::ports::TunnelStatus::Starting
+                                    | crate::containers::ports::TunnelStatus::Ready(_)
+                            )
+                        });
+                        if tunnels.len() >= 16 {
+                            source.containers.notice = Some(Err("Stop a tunnel before opening another. Each SSH session supports up to 16 temporary tunnels.".into()));
+                            continue;
+                        }
+                        let tunnel = crate::containers::ports::Tunnel::start(
+                            self.rt.handle(),
+                            client,
+                            item,
+                            port,
+                            mode,
+                            sudo,
+                            ui.ctx().clone(),
+                        );
+                        tunnels.insert(key, tunnel);
+                    }
+                }
+                TermAction::ContainerBrowser {
+                    tab,
+                    session,
+                    key,
+                    url,
+                } => {
+                    let valid = self
+                        .tabs
+                        .iter()
+                        .find_map(|t| match t {
+                            Tab::Terminal(source)
+                                if source.id == tab && source.containers.session == session =>
+                            {
+                                source.containers.manager.tunnels.get(&key)
+                            }
+                            _ => None,
+                        })
+                        .is_some_and(|tunnel| match tunnel.status() {
+                            crate::containers::ports::TunnelStatus::Ready(address) => [
+                                crate::containers::ports::OpenAs::Http,
+                                crate::containers::ports::OpenAs::Https,
+                            ]
+                            .iter()
+                            .any(|mode| mode.url(address).as_deref() == Some(url.as_str())),
+                            _ => false,
+                        });
+                    if !valid {
+                        continue;
+                    }
+                    let result = open::that_detached(&url).map_err(|error| error.to_string());
+                    if let Some(Tab::Terminal(source)) =
+                        self.tabs.iter_mut().find(|t| t.id() == tab)
+                    {
+                        if source.containers.session == session {
+                            if let Some(tunnel) = source.containers.manager.tunnels.get_mut(&key) {
+                                tunnel.browser_error = result.err();
+                            }
+                        }
+                    }
+                }
+                TermAction::ContainerTerminal {
+                    mut target,
+                    client,
+                    item,
+                    sudo,
+                } => {
+                    if let Some(command) = item.terminal_command(sudo) {
+                        target.host_id = None;
+                        target.label = format!("{} · {}", target.label, item.name);
+                        target.startup_script = None;
+                        target.exec_command = Some(command);
+                        target.env.clear();
+                        target.agent_forwarding = false;
+                        let session = crate::conn::spawn_ssh_channel(
+                            self.rt.handle(),
+                            target,
+                            self.conn_template(),
+                            self.spawn_opts(),
+                            client,
+                        );
+                        self.vault
+                            .connection_logs
+                            .push(crate::model::ConnectionLog {
+                                id: session.log_id,
+                                host_label: session.target.label.clone(),
+                                address: session.target.address.clone(),
+                                protocol: session.target.protocol,
+                                started: crate::model::now_ts(),
+                                ended: None,
+                                status: "Connecting".into(),
+                                log_file: session.term.lock().log_path.clone(),
+                            });
+                        if self.vault.connection_logs.len() > 1000 {
+                            self.vault.connection_logs.remove(0);
+                        }
+                        self.mark_dirty();
+                        self.open_terminal_session(session);
+                    }
                 }
                 TermAction::ContainerAct {
                     tab,

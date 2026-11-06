@@ -1,5 +1,7 @@
 //! SFTP / local filesystem backends and the transfer engine.
 
+pub mod sync;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
