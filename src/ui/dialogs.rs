@@ -9,12 +9,9 @@ use crate::conn::{PromptKind, PromptReply};
 use crate::model::{Host, Protocol};
 use crate::themes::Palette;
 
-fn modal_frame(pal: Palette) -> egui::Frame {
-    egui::Frame::new()
-        .fill(pal.card)
-        .stroke(egui::Stroke::new(1.0, pal.control_border))
-        .corner_radius(crate::themes::tokens::RADIUS_LARGE)
-        .inner_margin(egui::Margin::same(20))
+/// Modals draw their own overlay glass inside, so the Modal frame stays empty.
+fn modal_frame(_pal: Palette) -> egui::Frame {
+    egui::Frame::NONE
 }
 
 fn title(ui: &mut egui::Ui, text: &str) {
@@ -56,6 +53,7 @@ impl App {
             .backdrop_color(pal.scrim)
             .frame(modal_frame(pal))
             .show(ctx, |ui| {
+            super::glass::overlay_frame(ui, crate::themes::tokens::RADIUS_OVERLAY as f32, egui::Margin::same(24), |ui| {
             ui.set_width(440.0);
             match &req.kind {
                 PromptKind::HostKeyUnknown { host, port, key_type, fingerprint } => {
@@ -133,6 +131,7 @@ impl App {
                 reply = Some(PromptReply::Cancel);
             }
         });
+        });
         if let Some(r) = reply {
             if let Some(mut s) = self.prompts.pop_front() {
                 if let Some(req) = s.req.take() {
@@ -152,8 +151,15 @@ impl App {
             .backdrop_color(pal.scrim)
             .frame(modal_frame(pal))
             .show(ctx, |ui| {
-                ui.set_width(460.0);
-                outcome = self.dialog_body(ui, &mut dialog, pal);
+                super::glass::overlay_frame(
+                    ui,
+                    crate::themes::tokens::RADIUS_OVERLAY as f32,
+                    egui::Margin::same(24),
+                    |ui| {
+                        ui.set_width(460.0);
+                        outcome = self.dialog_body(ui, &mut dialog, pal);
+                    },
+                );
             });
         if resp.should_close() {
             outcome = Outcome::Close;

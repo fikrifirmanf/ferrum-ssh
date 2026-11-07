@@ -1,6 +1,6 @@
 //! Keychain, port forwarding, snippets, known hosts, and history/logs pages.
 
-use egui::{RichText, Stroke};
+use egui::RichText;
 use uuid::Uuid;
 
 use super::{card_frame, forms, hash_color, section_title};
@@ -26,10 +26,10 @@ fn page_header(
 }
 
 fn row_frame(pal: crate::themes::Palette) -> egui::Frame {
-    egui::Frame::new()
-        .fill(pal.card)
-        .stroke(Stroke::new(1.0, pal.border))
-        .corner_radius(egui::CornerRadius::same(crate::themes::tokens::RADIUS))
+    super::card_frame(pal)
+        .corner_radius(egui::CornerRadius::same(
+            crate::themes::tokens::RADIUS_INPUT,
+        ))
         .inner_margin(egui::Margin::symmetric(12, 10))
 }
 
@@ -654,9 +654,7 @@ fn snippet_card(
                 });
             });
             let preview: String = s.script.lines().take(3).collect::<Vec<_>>().join("\n");
-            egui::Frame::new()
-                .fill(pal.well)
-                .corner_radius(egui::CornerRadius::same(6))
+            super::glass::well_frame(ui.ctx(), 8)
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());

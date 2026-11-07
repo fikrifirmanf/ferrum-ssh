@@ -1,10 +1,11 @@
 //! UI building blocks plus the chrome (tab bar, sidebar, toasts, palette).
 
-pub mod container_view;
 pub mod container_manager;
+pub mod container_view;
 pub mod dialogs;
 pub mod editors;
 pub mod forms;
+pub mod glass;
 pub mod health_view;
 pub mod hosts;
 pub mod menus;
@@ -266,12 +267,19 @@ pub fn section_title(ui: &mut egui::Ui, text: &str, pal: Palette) {
     ui.add_space(2.0);
 }
 
-pub fn card_frame(pal: Palette) -> egui::Frame {
-    egui::Frame::new()
-        .fill(pal.card)
-        .stroke(Stroke::new(1.0, pal.border))
-        .corner_radius(CornerRadius::same(crate::themes::tokens::RADIUS_LARGE))
-        .inner_margin(egui::Margin::same(16))
+pub fn card_frame(_pal: Palette) -> egui::Frame {
+    let ctx = CARD_CTX.with(|c| c.borrow().clone());
+    match ctx {
+        Some(ctx) => glass::card_frame(&ctx, crate::themes::tokens::RADIUS_LARGE),
+        None => egui::Frame::new()
+            .corner_radius(CornerRadius::same(crate::themes::tokens::RADIUS_LARGE)),
+    }
+    .inner_margin(egui::Margin::same(16))
+}
+
+thread_local! {
+    /// The context of the frame being drawn, so frame builders without a `Ui` can read the glass look.
+    pub static CARD_CTX: std::cell::RefCell<Option<egui::Context>> = const { std::cell::RefCell::new(None) };
 }
 
 pub fn status_color(s: &Status, pal: Palette) -> Color32 {
@@ -315,19 +323,18 @@ impl App {
     pub fn tab_bar(&mut self, ui: &mut egui::Ui) {
         use crate::themes::tokens;
         let pal = self.pal();
+        let bar_margin = egui::Margin {
+            left: if cfg!(target_os = "macos") { 88 } else { 12 },
+            right: 12,
+            top: 0,
+            bottom: 0,
+        };
         egui::Panel::top("topbar")
+            .show_separator_line(false)
             .exact_size(tokens::BAR)
-            .frame(
-                egui::Frame::new()
-                    .fill(pal.sidebar)
-                    .inner_margin(egui::Margin {
-                        left: if cfg!(target_os = "macos") { 88 } else { 12 },
-                        right: 12,
-                        top: 0,
-                        bottom: 0,
-                    }),
-            )
+            .frame(egui::Frame::new().inner_margin(bar_margin))
             .show(ui, |ui| {
+                glass::pane_behind(ui, bar_margin, 0.0, glass::Tier::Chrome);
                 let response = ui.interact(
                     ui.max_rect(),
                     ui.scope_id().with("title-drag"),
@@ -573,14 +580,26 @@ impl App {
         let open = motion::ease_panel(ui.ctx(), egui::Id::unique("nav-width"), !collapsed);
         let show_labels = open > 0.5;
         egui::Panel::left("nav")
+            .show_separator_line(false)
             .exact_size(tokens::RAIL + (tokens::SIDEBAR - tokens::RAIL) * open)
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.sidebar)
+                    .outer_margin(egui::Margin {
+                        left: 8,
+                        right: 0,
+                        top: 8,
+                        bottom: 8,
+                    })
                     .inner_margin(egui::Margin::symmetric(8, 12)),
             )
             .show(ui, |ui| {
+                glass::pane_behind(
+                    ui,
+                    egui::Margin::symmetric(8, 12),
+                    tokens::RADIUS_PANE as f32,
+                    glass::Tier::Panel,
+                );
                 ui.spacing_mut().item_spacing.y = 2.0;
                 let short_nav = ui.available_height() < 320.0;
                 egui::ScrollArea::vertical()
@@ -590,7 +609,7 @@ impl App {
                     )
                     .min_scrolled_height(0.0)
                     .show(ui, |ui| {
-                        for (section, items) in [
+                        for (index, (section, items)) in [
                             (
                                 "Connect",
                                 vec![
@@ -621,9 +640,14 @@ impl App {
                                     ),
                                 ],
                             ),
-                        ] {
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            // Collapsed, a section title folds into a short hairline, so the
+                            // icons keep an even rhythm instead of gaps where titles were.
                             let (rect, _) = ui.allocate_exact_size(
-                                Vec2::new(ui.available_width(), 26.0),
+                                Vec2::new(ui.available_width(), 10.0 + 16.0 * open),
                                 Sense::hover(),
                             );
                             ui.painter().with_clip_rect(rect).text(
@@ -633,6 +657,13 @@ impl App {
                                 egui::FontId::new(12.0, crate::fonts::medium()),
                                 pal.faint.gamma_multiply(open),
                             );
+                            if index > 0 && open < 1.0 {
+                                let c = rect.center();
+                                ui.painter().line_segment(
+                                    [c - Vec2::new(8.0, 0.0), c + Vec2::new(8.0, 0.0)],
+                                    Stroke::new(1.0, pal.border.gamma_multiply(1.0 - open)),
+                                );
+                            }
                             for (page, icon, label) in items {
                                 if nav_item(
                                     ui,
@@ -650,7 +681,7 @@ impl App {
                                     self.host_inspector_open = false;
                                 }
                             }
-                            ui.add_space(8.0);
+                            ui.add_space(2.0 + 6.0 * open);
                         }
                     });
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
@@ -727,15 +758,28 @@ impl App {
             && self.inspected_host.is_some()
             && ui.ctx().content_rect().width() >= 1200.0;
         egui::Panel::right("host-inspector")
+            .show_separator_line(false)
             .default_size(tokens::INSPECTOR)
             .size_range(288.0..=360.0)
             .resizable(true)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.sidebar)
+                    .outer_margin(egui::Margin {
+                        left: 0,
+                        right: 8,
+                        top: 8,
+                        bottom: 8,
+                    })
                     .inner_margin(egui::Margin::same(20)),
             )
             .show_collapsible(ui, &mut { docked }, |ui| {
+                glass::pane_behind(
+                    ui,
+                    egui::Margin::same(20),
+                    tokens::RADIUS_PANE as f32,
+                    glass::Tier::Panel,
+                );
+                glass::heat(ui.ctx(), ui.max_rect());
                 self.host_inspector(ui);
             });
         let page_key = (self.page, self.editor.is_some());
@@ -745,20 +789,27 @@ impl App {
             page_key,
             motion::PANEL,
         );
+        let page_margin = egui::Margin::symmetric(
+            tokens::PAGE - 8,
+            if ui.ctx().content_rect().height() < 640.0 {
+                12
+            } else {
+                20
+            },
+        );
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(pal.bg)
-                    .inner_margin(egui::Margin::symmetric(
-                        tokens::PAGE,
-                        if ui.ctx().content_rect().height() < 640.0 {
-                            12
-                        } else {
-                            20
-                        },
-                    )),
+                    .outer_margin(egui::Margin::same(8))
+                    .inner_margin(page_margin),
             )
             .show(ui, |ui| {
+                glass::pane_behind(
+                    ui,
+                    page_margin,
+                    tokens::RADIUS_PANE as f32,
+                    glass::Tier::Panel,
+                );
                 ui.set_opacity(enter);
                 ui.add_space((1.0 - enter) * 6.0);
                 if self.editor.is_some() {
@@ -797,29 +848,40 @@ impl App {
             let ctx = ui.ctx().clone();
             let response = egui::Modal::new(egui::Id::unique("host-inspector-overlay"))
                 .backdrop_color(pal.scrim)
-                .frame(
-                    egui::Frame::new()
-                        .fill(pal.sidebar)
-                        .stroke(Stroke::new(1.0, pal.control_border))
-                        .corner_radius(tokens::RADIUS_LARGE)
-                        .inner_margin(egui::Margin::same(20)),
-                )
+                .frame(egui::Frame::NONE)
                 .show(&ctx, |ui| {
-                    ui.set_width(tokens::INSPECTOR);
-                    ui.set_height((ctx.content_rect().height() - 160.0).clamp(320.0, 640.0));
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Selected host").family(crate::fonts::semibold()));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .add(forms::Btn::icon(crate::icons::X, "Close host details"))
-                                .on_hover_text("Close host details")
-                                .clicked()
-                            {
-                                self.host_inspector_open = false;
-                            }
-                        });
-                    });
-                    self.host_inspector(ui);
+                    glass::overlay_frame(
+                        ui,
+                        tokens::RADIUS_PANE as f32,
+                        egui::Margin::same(20),
+                        |ui| {
+                            ui.set_width(tokens::INSPECTOR);
+                            ui.set_height(
+                                (ctx.content_rect().height() - 160.0).clamp(320.0, 640.0),
+                            );
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Selected host").family(crate::fonts::semibold()),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(forms::Btn::icon(
+                                                crate::icons::X,
+                                                "Close host details",
+                                            ))
+                                            .on_hover_text("Close host details")
+                                            .clicked()
+                                        {
+                                            self.host_inspector_open = false;
+                                        }
+                                    },
+                                );
+                            });
+                            self.host_inspector(ui);
+                        },
+                    );
                 });
             if response.should_close() {
                 self.host_inspector_open = false;
@@ -860,20 +922,11 @@ impl App {
                 .fade_in(false)
                 .show(ctx, |ui| {
                     ui.set_opacity(appear * leave);
-                    egui::Frame::new()
-                        .fill(pal.card_hover)
-                        .stroke(Stroke::new(
-                            1.0,
-                            if t.error {
-                                pal.danger
-                            } else {
-                                pal.control_border
-                            },
-                        ))
-                        .corner_radius(CornerRadius::same(crate::themes::tokens::RADIUS))
-                        .inner_margin(egui::Margin::symmetric(14, 8))
-                        .shadow(ui.visuals().popup_shadow)
-                        .show(ui, |ui| {
+                    glass::overlay_frame(
+                        ui,
+                        crate::themes::tokens::RADIUS_PANE as f32,
+                        egui::Margin::symmetric(14, 8),
+                        |ui| {
                             let width = (screen.width() - 64.0).clamp(160.0, 480.0);
                             ui.set_max_width(width);
                             ui.horizontal(|ui| {
@@ -901,7 +954,8 @@ impl App {
                                     dismiss = Some(i);
                                 }
                             });
-                        });
+                        },
+                    );
                 });
             y -= area.response.rect.height() + 8.0;
         }
@@ -1064,13 +1118,11 @@ impl App {
             .fade_in(false)
             .show(ctx, |ui| {
                 ui.set_opacity(shown);
-                egui::Frame::new()
-                    .fill(pal.card)
-                    .stroke(Stroke::new(1.0, pal.control_border))
-                    .corner_radius(CornerRadius::same(crate::themes::tokens::RADIUS_LARGE))
-                    .inner_margin(egui::Margin::ZERO)
-                    .shadow(ui.visuals().popup_shadow)
-                    .show(ui, |ui| {
+                let framed = glass::overlay_frame(
+                    ui,
+                    crate::themes::tokens::RADIUS_OVERLAY as f32,
+                    egui::Margin::ZERO,
+                    |ui| {
                         ui.set_width((screen.width() - 64.0).clamp(280.0, 600.0));
                         ui.spacing_mut().item_spacing.y = 0.0;
                         egui::Frame::NONE
@@ -1134,8 +1186,19 @@ impl App {
                                     resp.widget_info(|| {
                                         egui::WidgetInfo::labeled(egui::Role::Button, true, label)
                                     });
-                                    if sel || resp.hovered() {
-                                        ui.painter().rect_filled(rect, 8, pal.card_hover);
+                                    if sel {
+                                        ui.painter().rect_filled(
+                                            rect,
+                                            10,
+                                            pal.accent.gamma_multiply(0.14),
+                                        );
+                                        ui.painter().vline(
+                                            rect.left() + 1.5,
+                                            rect.y_range().shrink(8.0),
+                                            Stroke::new(3.0, pal.accent),
+                                        );
+                                    } else if resp.hovered() {
+                                        ui.painter().rect_filled(rect, 10, glass::hover_wash(ui));
                                     }
                                     ui.painter().text(
                                         rect.left_center() + Vec2::new(12.0, 0.0),
@@ -1165,7 +1228,11 @@ impl App {
                                 }
                             });
                         ui.add_space(6.0);
-                    });
+                    },
+                );
+                if open {
+                    glass::heat(ui.ctx(), framed.response.rect);
+                }
             });
         if open && ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.palette.open = false;
@@ -1212,13 +1279,18 @@ fn command_button(ui: &mut egui::Ui, wide: bool, pal: Palette) -> egui::Response
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Find a command"));
     let warm = motion::ease(ui.ctx(), resp.id.with("h"), resp.hovered(), motion::FAST);
+    let press = motion::spring_bool(
+        ui.ctx(),
+        resp.id.with("p"),
+        resp.is_pointer_button_down_on(),
+        motion::TOUCH,
+    );
     let ink = pal.text_dim.lerp_to_gamma(pal.text, warm);
-    ui.painter().rect(
+    let rect = glass::control(ui, rect, rect.height() / 2.0, glass::Tier::Control, press);
+    ui.painter().rect_filled(
         rect,
-        crate::themes::tokens::RADIUS,
-        pal.card,
-        Stroke::new(1.0, pal.border.lerp_to_gamma(pal.control_border, warm)),
-        egui::StrokeKind::Inside,
+        rect.height() / 2.0,
+        glass::hover_wash(ui).gamma_multiply(warm),
     );
     if wide {
         ui.painter().text(
@@ -1245,8 +1317,8 @@ fn command_button(ui: &mut egui::Ui, wide: bool, pal: Palette) -> egui::Response
         );
         ui.painter().rect(
             chip,
-            4,
-            pal.card_hover,
+            9,
+            glass::hover_wash(ui),
             Stroke::new(1.0, pal.border),
             egui::StrokeKind::Inside,
         );
@@ -1264,7 +1336,7 @@ fn command_button(ui: &mut egui::Ui, wide: bool, pal: Palette) -> egui::Response
     if resp.has_focus() {
         ui.painter().rect_stroke(
             rect.expand(2.0),
-            10,
+            rect.height() / 2.0 + 2.0,
             Stroke::new(2.0, pal.accent),
             egui::StrokeKind::Outside,
         );
@@ -1290,17 +1362,13 @@ fn tab_chip(
     resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, active, title));
     let ctx = ui.ctx();
     let hover = motion::ease(ctx, resp.id.with("h"), resp.hovered(), motion::FAST);
-    let line = motion::ease(ctx, resp.id.with("line"), active, motion::CONTROL);
-    let p = ui.painter();
-    p.rect_filled(rect, 0, pal.card.gamma_multiply(hover));
-    if line > 0.0 {
-        let half = (rect.width() / 2.0 - 12.0) * line;
-        p.hline(
-            (rect.center().x - half)..=(rect.center().x + half),
-            rect.bottom() - 1.0,
-            Stroke::new(2.0, pal.accent),
-        );
+    let face = rect.shrink2(Vec2::new(2.0, 8.0));
+    if active {
+        glass::lens(ui, egui::Id::unique("session-tab-lens"), face, 9.0);
+        glass::heat(ui.ctx(), face);
     }
+    let p = ui.painter();
+    p.rect_filled(face, 9, glass::hover_wash(ui).gamma_multiply(hover));
     let ink = if active {
         pal.text
     } else {
@@ -1318,8 +1386,8 @@ fn tab_chip(
     );
     if resp.has_focus() {
         p.rect_stroke(
-            rect.shrink(4.0),
-            6,
+            face.expand(1.0),
+            10,
             Stroke::new(2.0, pal.accent),
             egui::StrokeKind::Inside,
         );
@@ -1370,21 +1438,35 @@ fn nav_item(
         motion::FAST,
     );
     let on = motion::ease(ctx, resp.id.with("on"), active, motion::FAST);
+    if active {
+        glass::lens(
+            ui,
+            egui::Id::unique("navigation-lens"),
+            rect,
+            rect.height() / 2.0,
+        );
+    }
     let p = ui.painter();
-    p.rect_filled(rect, 8, pal.card.gamma_multiply(hover));
-    p.rect_filled(rect, 8, pal.card_hover.gamma_multiply(on));
+    p.rect_filled(
+        rect,
+        rect.height() / 2.0,
+        glass::hover_wash(ui).gamma_multiply(hover),
+    );
     if resp.has_focus() {
         p.rect_stroke(
-            rect.shrink(1.0),
-            8,
+            rect.expand(1.0),
+            rect.height() / 2.0 + 1.0,
             Stroke::new(2.0, pal.accent),
-            egui::StrokeKind::Inside,
+            egui::StrokeKind::Outside,
         );
     }
     let ink = pal.text_dim.lerp_to_gamma(pal.text, hover.max(on));
+    // Expanded, the icon leads its label; collapsed, it sits in the middle of the rail,
+    // under the selection lens.
+    let icon_x = egui::lerp(rect.center().x..=rect.left() + 20.0, open);
     p.text(
-        rect.left_center() + Vec2::new(11.0, 0.0),
-        egui::Align2::LEFT_CENTER,
+        egui::pos2(icon_x, rect.center().y),
+        egui::Align2::CENTER_CENTER,
         icon,
         egui::FontId::proportional(18.0),
         pal.text_dim
@@ -1400,9 +1482,25 @@ fn nav_item(
             ink.gamma_multiply(open),
         );
     }
-    if open < 0.5 {
-        resp.on_hover_text(label)
-    } else {
-        resp
+    if open < 0.5 && resp.hovered() {
+        // A glass label beside the rail, level with the icon. egui's tooltip follows the
+        // pointer and lands on top of the rail.
+        let at = egui::pos2(ui.max_rect().right() + 18.0, rect.center().y);
+        egui::Area::new(resp.id.with("rail-label"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(at)
+            .pivot(egui::Align2::LEFT_CENTER)
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                glass::overlay_frame(ui, 10.0, egui::Margin::symmetric(10, 6), |ui| {
+                    ui.label(
+                        egui::RichText::new(label)
+                            .size(13.0)
+                            .family(crate::fonts::medium())
+                            .color(pal.text),
+                    );
+                });
+            });
     }
+    resp
 }

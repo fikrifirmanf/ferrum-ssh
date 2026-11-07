@@ -69,10 +69,16 @@ impl App {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(pal.bg)
-                    .inner_margin(egui::Margin::same(24)),
+                    .outer_margin(egui::Margin::same(8))
+                    .inner_margin(egui::Margin::same(16)),
             )
             .show(ui, |ui| {
+                super::glass::pane_behind(
+                    ui,
+                    egui::Margin::same(16),
+                    crate::themes::tokens::RADIUS_PANE as f32,
+                    super::glass::Tier::Panel,
+                );
                 ui.label(
                     RichText::new("File transfer")
                         .size(crate::themes::tokens::TITLE)
@@ -388,11 +394,27 @@ impl App {
             .collect();
         self.transfer_retries.retain(|id, _| retryable.contains(id));
         egui::Panel::bottom("transfers")
+            .show_separator_line(false)
             .resizable(true)
             .default_size((ui.ctx().content_rect().height()*0.28).clamp(90.0,180.0))
             .size_range(90.0..=(ui.ctx().content_rect().height()*0.4).clamp(90.0,420.0))
-            .frame(egui::Frame::new().fill(pal.sidebar).inner_margin(egui::Margin::symmetric(14, 8)))
+            .frame(
+                egui::Frame::new()
+                    .outer_margin(egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: 0,
+                        bottom: 8,
+                    })
+                    .inner_margin(egui::Margin::symmetric(14, 8)),
+            )
             .show(ui, |ui| {
+                super::glass::pane_behind(
+                    ui,
+                    egui::Margin::symmetric(14, 8),
+                    crate::themes::tokens::RADIUS_PANE as f32,
+                    super::glass::Tier::Panel,
+                );
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Transfer queue").family(crate::fonts::semibold()));
                     ui.label(RichText::new(format!("{}", list.len())).small().color(pal.text_dim));
@@ -521,10 +543,7 @@ fn fs_pane(
     let id = p.id;
     // Inputs derive persistent IDs from the UI scope, so each location needs its own.
     ui.push_id(("sftp-pane", id), |ui| {
-        egui::Frame::new()
-            .fill(pal.panel)
-            .stroke(Stroke::new(1.0, pal.border))
-            .corner_radius(0)
+        super::glass::card_frame(ui.ctx(), crate::themes::tokens::RADIUS_LARGE)
             .inner_margin(egui::Margin::same(16))
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
@@ -948,9 +967,7 @@ fn inline_forms(
     let id = p.id;
     let dir = p.path.clone();
     let form = |ui: &mut egui::Ui, add: &mut dyn FnMut(&mut egui::Ui)| {
-        egui::Frame::new()
-            .fill(pal.card)
-            .corner_radius(8)
+        super::glass::card_frame(ui.ctx(), crate::themes::tokens::RADIUS_INPUT)
             .inner_margin(egui::Margin::same(8))
             .show(ui, |ui| {
                 ui.horizontal(|ui| add(ui));

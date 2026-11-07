@@ -21,6 +21,10 @@ Captured from the running Workbench UI with demo hosts. No saved connections or 
 
 </details>
 
+## Liquid glass interface
+
+Panes, controls, menus and dialogs are drawn as liquid glass by [embun](https://crates.io/crates/embun) on the GPU, so the look is the same on macOS, Windows and Linux. Choose how clear or tinted the glass is with **Settings → Appearance → Glass level**. **Reduce transparency** makes it solid; on macOS and Windows it also follows the system setting. Selections and switches move on springs, and **Reduce motion** stops that.
+
 ## Forge interface
 
 Select a host to inspect its address, login and route before connecting. Use Up/Down to select a row and Enter to connect. Groups fold in place, and search works across them. To show one group or filter by tag, use the `…` menu in the host toolbar. Quick connect is available from the command palette and the same menu.
@@ -41,7 +45,7 @@ Choose comfortable or compact rows in the host toolbar or **Settings → Appeara
 - **Containers:** a side panel for SSH tabs that lists Docker and Podman containers and Kubernetes pods by calling the CLIs already on the server. Start, stop or restart a container, read its recent logs, or type a shell command (`docker exec -it … sh`) into the terminal for you to run.
 - **Import:** OpenSSH config, PuTTY, MobaXterm, SecureCRT and CSV, plus cloud hosts from DigitalOcean, AWS EC2 and Azure.
 - **Vault:** stored on disk, optionally encrypted with a master password (Argon2id + ChaCha20-Poly1305). It auto-locks when idle and supports encrypted export/import and folder sync. On macOS, Touch ID can unlock a master-password vault (Settings → Security); the password is kept in the login keychain behind the Touch ID prompt.
-- **Appearance:** dark, midnight and light themes, accent colours, 18 terminal colour schemes, custom fonts and keyword highlighting.
+- **Appearance:** Smoke, Midnight and Frost liquid glass themes with an adjustable glass level, accent colours, 18 terminal colour schemes, custom fonts and keyword highlighting.
 - **Suggestions:** as you type in a terminal, grey ghost text offers a command from this host's history, other history, your snippets, then a built-in list of about 500 common commands (git, docker, kubectl, systemctl, apt and more). Press → to accept. It pauses after Tab, ↑ or cursor moves, and never records or offers anything typed at a password prompt. Turn it off in Settings → Terminal.
 - **Server health:** a side panel in any SSH terminal shows live CPU, memory, swap, disks, uptime, load and the busiest processes, read over the same connection every 3 seconds. Linux reports everything; macOS and BSD report load, disks and processes. The host library shows TCP probe results separately from authenticated session state. Direct hosts are checked once a minute while the vault is open; hosts behind a jump host or proxy are skipped. Turn the probes off in Settings → Connections.
 - **Command palette** (⌘K / Ctrl+K) and an optional AI command assistant.

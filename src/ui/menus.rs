@@ -78,57 +78,59 @@ impl App {
             self.menu_action(&action, ui.ctx());
         }
         #[cfg(not(target_os = "macos"))]
-        egui::Panel::top("application-menus").show(ui, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                for (title, items) in [
-                    (
-                        "File",
-                        vec![
-                            ("New host", "new-host"),
-                            ("Local terminal", "local"),
-                            ("SFTP browser", "sftp"),
-                            ("Close tab", "close"),
-                            ("Settings", "settings"),
-                            ("Quit", "quit"),
-                        ],
-                    ),
-                    (
-                        "Edit",
-                        vec![
-                            ("Cut", "cut"),
-                            ("Copy", "copy"),
-                            ("Paste", "paste"),
-                            ("Select all", "select-all"),
-                        ],
-                    ),
-                    (
-                        "View",
-                        vec![
-                            ("Hosts", "hosts"),
-                            ("Toggle sidebar", "sidebar"),
-                            ("Command palette", "palette"),
-                        ],
-                    ),
-                    (
-                        "Help",
-                        vec![
-                            ("Ferrum help", "help"),
-                            ("Check for updates…", "updates"),
-                            ("About Ferrum", "about"),
-                        ],
-                    ),
-                ] {
-                    ui.menu_button(title, |ui| {
-                        for (label, action) in items {
-                            if ui.button(label).clicked() {
-                                self.menu_action(action, ui.ctx());
-                                ui.close();
+        egui::Panel::top("application-menus")
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                egui::MenuBar::new().ui(ui, |ui| {
+                    for (title, items) in [
+                        (
+                            "File",
+                            vec![
+                                ("New host", "new-host"),
+                                ("Local terminal", "local"),
+                                ("SFTP browser", "sftp"),
+                                ("Close tab", "close"),
+                                ("Settings", "settings"),
+                                ("Quit", "quit"),
+                            ],
+                        ),
+                        (
+                            "Edit",
+                            vec![
+                                ("Cut", "cut"),
+                                ("Copy", "copy"),
+                                ("Paste", "paste"),
+                                ("Select all", "select-all"),
+                            ],
+                        ),
+                        (
+                            "View",
+                            vec![
+                                ("Hosts", "hosts"),
+                                ("Toggle sidebar", "sidebar"),
+                                ("Command palette", "palette"),
+                            ],
+                        ),
+                        (
+                            "Help",
+                            vec![
+                                ("Ferrum help", "help"),
+                                ("Check for updates…", "updates"),
+                                ("About Ferrum", "about"),
+                            ],
+                        ),
+                    ] {
+                        ui.menu_button(title, |ui| {
+                            for (label, action) in items {
+                                if ui.button(label).clicked() {
+                                    self.menu_action(action, ui.ctx());
+                                    ui.close();
+                                }
                             }
-                        }
-                    });
-                }
+                        });
+                    }
+                });
             });
-        });
     }
 }
 
