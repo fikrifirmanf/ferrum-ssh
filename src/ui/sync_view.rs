@@ -103,11 +103,9 @@ impl SyncDialog {
         egui::Modal::new(modal_id)
             .area(egui::Modal::default_area(modal_id).fade_in(false))
             .backdrop_color(pal.scrim)
-            .frame(egui::Frame::new().fill(pal.card)
-                .stroke(egui::Stroke::new(1.0, pal.control_border))
-                .corner_radius(crate::themes::tokens::RADIUS_LARGE)
-                .inner_margin(egui::Margin::same(20)))
+            .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
+                super::glass::overlay_frame(ui, crate::themes::tokens::RADIUS_OVERLAY as f32, egui::Margin::same(24), |ui| {
                 ui.set_width(620.0_f32.min((ctx.content_rect().width() - 64.0).max(240.0)));
                 ui.set_max_height((ctx.content_rect().height() - 100.0).max(160.0));
                 egui::ScrollArea::vertical().id_salt("sync-dialog-content")
@@ -200,6 +198,7 @@ impl SyncDialog {
                     }
                 });
                 });
+            });
             });
         close
     }

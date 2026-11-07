@@ -177,12 +177,7 @@ impl App {
             .resizable(false)
             .default_width(336.0)
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-24.0, 76.0))
-            .frame(
-                egui::Frame::window(&ctx.global_style())
-                    .fill(pal.card)
-                    .stroke(egui::Stroke::new(1.0, pal.control_border))
-                    .inner_margin(20),
-            )
+            .frame(egui::Frame::window(&ctx.global_style()).inner_margin(20))
             .show(ctx, |ui| {
                 ui.label(
                     egui::RichText::new(format!("Ferrum {tag} is ready to download"))

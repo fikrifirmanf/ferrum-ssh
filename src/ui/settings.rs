@@ -125,9 +125,9 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 let width = ((ui.available_width() - 24.0) / 3.0).clamp(100.0, 200.0);
                 for (theme, label) in [
-                    (UiTheme::Dark, "Iron"),
+                    (UiTheme::Dark, "Smoke"),
                     (UiTheme::Midnight, "Midnight"),
-                    (UiTheme::Light, "Light"),
+                    (UiTheme::Light, "Frost"),
                 ] {
                     let colors = crate::themes::palette(theme, s.accent);
                     let (rect, response) =
@@ -235,6 +235,19 @@ impl App {
                     s.accent = [col.r(), col.g(), col.b()];
                 }
             });
+            forms::heading(ui, "Glass", 14.0);
+            forms::help(
+                ui,
+                "Clear shows more of what sits behind each pane. Tinted makes panes calmer and easier to read.",
+                pal,
+            );
+            forms::slider(ui, &mut s.glass_level, "Glass level", "Clear", "Tinted");
+            forms::switch_row(
+                ui,
+                "Reduce transparency",
+                "Draws every pane solid. Your system setting is also respected.",
+                &mut s.reduce_transparency,
+            );
             forms::switch_row(
                 ui,
                 "Reduce motion",

@@ -216,10 +216,7 @@ impl App {
                 let Some(outcome) = &outcome else {
                     return;
                 };
-                egui::Frame::new()
-                    .fill(pal.card)
-                    .stroke(egui::Stroke::new(1.0, pal.border))
-                    .corner_radius(8)
+                super::glass::card_frame(ui.ctx(), crate::themes::tokens::RADIUS_INPUT)
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());

@@ -464,6 +464,10 @@ pub struct Settings {
     /// Set once a vault from before the Forge redesign has moved off the old default accent.
     pub accent_migrated: bool,
     pub reduce_motion: bool,
+    /// Liquid glass level: 0 clear, 0.5 default, 1 tinted.
+    pub glass_level: f32,
+    /// Draws every glass surface solid. The system setting is also respected.
+    pub reduce_transparency: bool,
     pub terminal_scheme: String,
     pub font_size: f32,
     pub custom_font_path: String,
@@ -554,6 +558,8 @@ impl Default for Settings {
             accent: crate::themes::DEFAULT_ACCENT,
             accent_migrated: false,
             reduce_motion: false,
+            glass_level: 0.5,
+            reduce_transparency: false,
             terminal_scheme: "Ferrum Night".into(),
             font_size: 14.0,
             custom_font_path: String::new(),

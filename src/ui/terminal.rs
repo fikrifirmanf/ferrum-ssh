@@ -175,13 +175,25 @@ impl App {
 
         // Session actions stay in a compact toolbar; shell input keeps its own keybindings.
         egui::Panel::top(egui::Id::unique(("term-toolbar", tab_id)))
+            .show_separator_line(false)
             .exact_size(crate::themes::tokens::BAR)
             .frame(
                 egui::Frame::new()
-                    .fill(pal.bg)
+                    .outer_margin(egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: 8,
+                        bottom: 0,
+                    })
                     .inner_margin(egui::Margin::symmetric(12, 0)),
             )
             .show(ui, |ui| {
+                super::glass::pane_behind(
+                    ui,
+                    egui::Margin::symmetric(12, 0),
+                    crate::themes::tokens::RADIUS_PANE as f32,
+                    super::glass::Tier::Chrome,
+                );
                 ui.horizontal_centered(|ui| {
                     if let Some(pane) = tab.panes.get(tab.active) {
                         let status = pane.session.status.lock().clone();
@@ -257,9 +269,7 @@ impl App {
                         );
                         ui.menu_button(format!("{}  Tools", crate::icons::MONITOR), |ui| {
                             for (panel, label) in SESSION_TOOLS {
-                                if ui
-                                    .selectable_label(tab.side_panel == Some(panel), label)
-                                    .clicked()
+                                if forms::option(ui, tab.side_panel == Some(panel), label).clicked()
                                 {
                                     tab.side_panel = Some(panel);
                                     ui.close();
@@ -278,11 +288,11 @@ impl App {
                             if ui
                                 .add_enabled(
                                     ssh,
-                                    forms::Btn::ghost(format!(
+                                    // Same face as the Tools and Split menus beside it.
+                                    egui::Button::new(format!(
                                         "{}  Files",
                                         crate::icons::ARROWS_DOWN_UP
-                                    ))
-                                    .height(32.0),
+                                    )),
                                 )
                                 .on_disabled_hover_text(
                                     "Open an SSH session to browse its remote files.",
@@ -431,11 +441,27 @@ impl App {
                 motion::PANEL,
             );
             egui::Panel::right(egui::Id::unique(("term-side", tab_id)))
+            .show_separator_line(false)
                 .default_size(340.0)
                 .size_range(260.0..=440.0)
                 .resizable(true)
-                .frame(egui::Frame::new().fill(pal.sidebar).inner_margin(egui::Margin::same(16)))
+                .frame(
+                    egui::Frame::new()
+                        .outer_margin(egui::Margin {
+                            left: 0,
+                            right: 8,
+                            top: 8,
+                            bottom: 8,
+                        })
+                        .inner_margin(egui::Margin::same(16)),
+                )
                 .show(ui, |ui| {
+                    super::glass::pane_behind(
+                        ui,
+                        egui::Margin::same(16),
+                        crate::themes::tokens::RADIUS_PANE as f32,
+                        super::glass::Tier::Panel,
+                    );
                     ui.set_opacity(enter);
                     ui.horizontal(|ui|{
                         let width=(ui.available_width()-40.0).max(120.0);
@@ -555,7 +581,7 @@ impl App {
                         match &tab.ai_result {
                             Some(Ok(cmd)) => {
                                 let cmd = cmd.clone();
-                                egui::Frame::new().fill(pal.well).corner_radius(CornerRadius::same(8)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                                super::glass::well_frame(ui.ctx(), 10).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
                                     ui.set_width(ui.available_width());
                                     ui.label(RichText::new(&cmd).monospace());
                                 });
@@ -584,10 +610,16 @@ impl App {
             egui::CentralPanel::default()
                 .frame(
                     egui::Frame::new()
-                        .fill(pal.bg)
+                        .outer_margin(egui::Margin::same(8))
                         .inner_margin(egui::Margin::same(16)),
                 )
                 .show(ui, |ui| {
+                    super::glass::pane_behind(
+                        ui,
+                        egui::Margin::same(16),
+                        crate::themes::tokens::RADIUS_PANE as f32,
+                        super::glass::Tier::Panel,
+                    );
                     let source = match tab.panes.get(tab.active) {
                         Some(pane)
                             if pane.session.target.protocol != crate::model::Protocol::Ssh =>
@@ -664,9 +696,18 @@ impl App {
         } else {
             if tab.broadcast && tab.panes.len() > 1 {
                 egui::Panel::top(egui::Id::unique(("broadcast-warning", tab_id)))
+                    .show_separator_line(false)
                     .frame(
                         egui::Frame::new()
-                            .fill(pal.panel)
+                            .fill(pal.warning.gamma_multiply(0.14))
+                            .stroke(Stroke::new(1.0, pal.warning.gamma_multiply(0.4)))
+                            .corner_radius(crate::themes::tokens::RADIUS_LARGE)
+                            .outer_margin(egui::Margin {
+                                left: 8,
+                                right: 8,
+                                top: 8,
+                                bottom: 0,
+                            })
                             .inner_margin(egui::Margin::symmetric(16, 8)),
                     )
                     .show(ui, |ui| {
@@ -695,10 +736,23 @@ impl App {
             // ---------- Panes ----------
             let mut close_pane = None;
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().fill(pal.well))
+                .frame(egui::Frame::new().outer_margin(egui::Margin::same(8)))
                 .show(ui, |ui| {
                     let area = ui.available_rect_before_wrap();
                     let rects = pane_rects(area, tab.panes.len(), tab.layout);
+                    for rect in &rects {
+                        // Terminal text sits on the densest glass; the scheme's own
+                        // background is painted over it by the terminal view.
+                        super::glass::pane(
+                            ui,
+                            *rect,
+                            crate::themes::tokens::RADIUS_PANE as f32,
+                            super::glass::Tier::Dense,
+                        );
+                    }
+                    if let Some(rect) = rects.get(tab.active) {
+                        super::glass::heat(ui.ctx(), *rect);
+                    }
                     let multi = tab.panes.len() > 1;
                     let mut broadcast_bytes: Vec<u8> = vec![];
                     let mut direct: Vec<(usize, Vec<u8>)> = vec![];
@@ -859,54 +913,53 @@ impl App {
                                     .max_rect(banner)
                                     .id_salt(("banner", pane.session.id)),
                             );
-                            egui::Frame::new()
-                                .fill(pal.panel)
-                                .stroke(Stroke::new(
-                                    1.0,
-                                    if matches!(st, Status::Failed(_)) {
-                                        pal.danger
-                                    } else {
-                                        pal.border
-                                    },
-                                ))
-                                .corner_radius(CornerRadius::same(10))
-                                .inner_margin(egui::Margin::symmetric(12, 6))
-                                .show(&mut bui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        let short: String = reason.chars().take(90).collect();
-                                        ui.label(RichText::new(short).color(pal.text_dim));
-                                        if let Some(at) = pane.session.reconnect_at {
-                                            let left = (at - ui.input(|i| i.time)).max(0.0);
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "reconnecting in {:.0}s",
-                                                    left
-                                                ))
+                            super::glass::card_frame(
+                                &bui.ctx().clone(),
+                                crate::themes::tokens::RADIUS_LARGE,
+                            )
+                            .fill(pal.panel.gamma_multiply(0.92))
+                            .stroke(Stroke::new(
+                                1.0,
+                                if matches!(st, Status::Failed(_)) {
+                                    pal.danger
+                                } else {
+                                    pal.border
+                                },
+                            ))
+                            .corner_radius(CornerRadius::same(10))
+                            .inner_margin(egui::Margin::symmetric(12, 6))
+                            .show(&mut bui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let short: String = reason.chars().take(90).collect();
+                                    ui.label(RichText::new(short).color(pal.text_dim));
+                                    if let Some(at) = pane.session.reconnect_at {
+                                        let left = (at - ui.input(|i| i.time)).max(0.0);
+                                        ui.label(
+                                            RichText::new(format!("reconnecting in {:.0}s", left))
                                                 .small()
                                                 .color(pal.warning),
-                                            );
-                                        }
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui.button("Close").clicked() {
-                                                    close_pane = Some(i);
-                                                }
-                                                if ui
-                                                    .add(super::primary_button(
-                                                        "\u{E036} Reconnect",
-                                                        pal,
-                                                    ))
-                                                    .clicked()
-                                                {
-                                                    actions.push(TermAction::Reconnect(
-                                                        pane.session.id,
-                                                    ));
-                                                }
-                                            },
                                         );
-                                    });
+                                    }
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.button("Close").clicked() {
+                                                close_pane = Some(i);
+                                            }
+                                            if ui
+                                                .add(super::primary_button(
+                                                    "\u{E036} Reconnect",
+                                                    pal,
+                                                ))
+                                                .clicked()
+                                            {
+                                                actions
+                                                    .push(TermAction::Reconnect(pane.session.id));
+                                            }
+                                        },
+                                    );
                                 });
+                            });
                             // Enter reconnects too.
                             if i == tab.active
                                 && !modal_open

@@ -285,6 +285,11 @@ pub struct Palette {
     pub ring: Color32,
     /// Dim layer behind overlays.
     pub scrim: Color32,
+    /// Fill of prominent controls (primary buttons, switches, sliders): the accent as chosen,
+    /// which in Frost is brighter than `accent` text.
+    pub accent_fill: Color32,
+    /// Label on `accent_fill`.
+    pub on_accent_fill: Color32,
 }
 
 impl Palette {
@@ -312,6 +317,8 @@ impl Palette {
             well: mix(self.well, to.well),
             ring: mix(self.ring, to.ring),
             scrim: mix(self.scrim, to.scrim),
+            accent_fill: mix(self.accent_fill, to.accent_fill),
+            on_accent_fill: mix(self.on_accent_fill, to.on_accent_fill),
         }
     }
 }
@@ -379,6 +386,12 @@ pub mod tokens {
     pub const PAGE: i8 = 24;
     pub const RADIUS: u8 = 8;
     pub const RADIUS_LARGE: u8 = 12;
+    /// Floating glass panes: sidebar, page, inspector.
+    pub const RADIUS_PANE: u8 = 14;
+    /// Inputs, selects, rows: concentric inside a pane.
+    pub const RADIUS_INPUT: u8 = 10;
+    /// Overlays and the window.
+    pub const RADIUS_OVERLAY: u8 = 20;
     pub const TITLE: f32 = 22.0;
     pub const CAPTION: f32 = 12.0;
     pub const SIDEBAR: f32 = 216.0;
@@ -407,24 +420,26 @@ pub fn palette(theme: UiTheme, rgb: [u8; 3]) -> Palette {
         steel,
         well,
     ) = match theme {
+        // Smoke. Surfaces are the glass tiers composited over the field's base color.
         UiTheme::Dark => (
-            0x141416, 0x101012, 0x1c1c1f, 0x26262a, 0x2e2e33, 0xf2f0eb, 0xadaba5, 0x918f89,
-            0x6e6e76, 0x6fd6a0, 0xebc85a, 0xf7808c, 0x8fb6dc, 0x0e0e10,
+            0x0b0b0e, 0x141418, 0x17171b, 0x222228, 0x2a2a2f, 0xf4f2ee, 0xb9b6b0, 0x9a978f,
+            0x6e6e76, 0x6fd6a0, 0xebc85a, 0xf7808c, 0x8fb6dc, 0x121215,
         ),
         UiTheme::Midnight => (
-            0x0b0d12, 0x07090d, 0x12151c, 0x1b1f28, 0x242934, 0xeef1f6, 0xa6aebd, 0x8790a2,
-            0x66708a, 0x6fd6a0, 0xebc85a, 0xf7808c, 0x8fb6dc, 0x07090d,
+            0x07090d, 0x0f1218, 0x12151c, 0x1b1f28, 0x242934, 0xeef1f6, 0xa6aebd, 0x8790a2,
+            0x66708a, 0x6fd6a0, 0xebc85a, 0xf7808c, 0x8fb6dc, 0x0b0d12,
         ),
+        // Frost.
         UiTheme::Light => (
-            0xf6f4ef, 0xedeae3, 0xffffff, 0xf1eee8, 0xdfdbd2, 0x1c1b19, 0x5c5a54, 0x66635c,
-            0x8a867d, 0x14774a, 0x7f6000, 0xbe1e3a, 0x28608f, 0xfbfaf7,
+            0xe9e7e3, 0xf4f3f1, 0xf6f5f4, 0xffffff, 0xdcd9d3, 0x17171a, 0x4a4844, 0x5f5c57,
+            0x8a867d, 0x17683f, 0x765500, 0xa11f30, 0x2a5780, 0xfbfaf9,
         ),
     };
     // The three named accents have tuned tones per theme; anything else adapts below.
     let (tuned, tuned_soft) = match (theme, rgb) {
-        (UiTheme::Dark, DEFAULT_ACCENT) => (0xff8a4c, Some(0x2e2019)),
+        (UiTheme::Dark, DEFAULT_ACCENT) => (0xff8a4c, Some(0x382722)),
         (UiTheme::Midnight, DEFAULT_ACCENT) => (0xff9259, Some(0x2a1c16)),
-        (UiTheme::Light, DEFAULT_ACCENT) => (0xb5430f, Some(0xf7e4d8)),
+        (UiTheme::Light, DEFAULT_ACCENT) => (0x9e4513, Some(0xf7e6dc)),
         (UiTheme::Light, COBALT_ACCENT) => (0x2f52c9, Some(0xdee5fb)),
         (UiTheme::Light, PATINA_ACCENT) => (0x0f6f5c, Some(0xd5eee8)),
         (_, COBALT_ACCENT) => (0x789aff, Some(0x222a42)),
@@ -446,6 +461,12 @@ pub fn palette(theme: UiTheme, rgb: [u8; 3]) -> Palette {
         }
         soft = soft.lerp_to_gamma(h(bg), 0.2);
     }
+    // Frost's surfaces sit closer together, so check the accent against the selection too.
+    let accent = accent_on(
+        accent,
+        &[h(bg), h(sidebar), h(panel), h(hover), soft],
+        h(text),
+    );
     let ring = Color32::from_rgba_unmultiplied(
         accent.r(),
         accent.g(),
@@ -476,6 +497,12 @@ pub fn palette(theme: UiTheme, rgb: [u8; 3]) -> Palette {
         steel: h(steel),
         well: h(well),
         ring,
+        accent_fill: Color32::from_rgb(rgb[0], rgb[1], rgb[2]),
+        on_accent_fill: if rgb == DEFAULT_ACCENT {
+            h(0x1c0d05)
+        } else {
+            readable_on(Color32::from_rgb(rgb[0], rgb[1], rgb[2]))
+        },
         scrim: if theme == UiTheme::Light {
             Color32::from_rgba_unmultiplied(40, 36, 30, 82)
         } else {
@@ -501,46 +528,78 @@ pub fn apply_palette(ctx: &egui::Context, theme: UiTheme, p: Palette) {
     } else {
         Visuals::dark()
     };
-    let radius = CornerRadius::same(tokens::RADIUS);
-    v.panel_fill = p.bg;
-    v.window_fill = p.panel;
-    v.extreme_bg_color = p.well;
+    let radius = CornerRadius::same(tokens::RADIUS_INPUT);
+    let light = theme == UiTheme::Light;
+    // Panels are glass now; anything egui fills on its own gets overlay glass.
+    v.panel_fill = Color32::TRANSPARENT;
+    v.window_fill = if light {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 222)
+    } else {
+        Color32::from_rgba_unmultiplied(36, 36, 42, 222)
+    };
+    v.extreme_bg_color = if light {
+        Color32::from_white_alpha(190)
+    } else {
+        Color32::from_black_alpha(64)
+    };
     v.text_edit_bg_color = Some(p.card);
     v.faint_bg_color = p.card;
     v.override_text_color = Some(p.text);
     v.hyperlink_color = p.accent;
     v.selection.bg_fill = p.accent_soft;
     v.selection.stroke = Stroke::new(2.0, p.accent);
-    v.window_corner_radius = CornerRadius::same(tokens::RADIUS_LARGE);
-    v.menu_corner_radius = radius;
-    v.window_stroke = Stroke::new(1.0, p.control_border);
+    v.window_corner_radius = CornerRadius::same(tokens::RADIUS_OVERLAY);
+    v.menu_corner_radius = CornerRadius::same(tokens::RADIUS_PANE);
+    v.window_stroke = Stroke::new(
+        1.0,
+        if light {
+            Color32::from_black_alpha(20)
+        } else {
+            Color32::from_white_alpha(30)
+        },
+    );
     v.popup_shadow = egui::epaint::Shadow {
-        offset: [0, 12],
-        blur: 40,
+        offset: [0, 24],
+        blur: 60,
         spread: 0,
-        color: Color32::from_black_alpha(if theme == UiTheme::Light { 46 } else { 128 }),
+        color: Color32::from_black_alpha(if light { 51 } else { 128 }),
     };
     v.window_shadow = v.popup_shadow;
+    // egui's own widgets (menu buttons, plain buttons) get the same glass control look.
+    let (rest, over, rim) = if light {
+        (
+            Color32::from_white_alpha(170),
+            Color32::from_white_alpha(225),
+            Color32::from_black_alpha(26),
+        )
+    } else {
+        (
+            Color32::from_white_alpha(18),
+            Color32::from_white_alpha(30),
+            Color32::from_white_alpha(34),
+        )
+    };
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
-    v.widgets.noninteractive.bg_fill = p.card;
+    v.widgets.noninteractive.bg_fill = Color32::TRANSPARENT;
     v.widgets.noninteractive.corner_radius = radius;
-    v.widgets.inactive.bg_fill = p.card_hover;
-    v.widgets.inactive.weak_bg_fill = p.card;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, p.control_border);
+    v.widgets.inactive.bg_fill = rest;
+    v.widgets.inactive.weak_bg_fill = rest;
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, rim);
     v.widgets.inactive.corner_radius = radius;
-    v.widgets.hovered.bg_fill = p.card_hover;
-    v.widgets.hovered.weak_bg_fill = p.card_hover;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, p.control_border);
+    v.widgets.hovered.bg_fill = over;
+    v.widgets.hovered.weak_bg_fill = over;
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0, rim);
     v.widgets.hovered.expansion = 0.0;
     v.widgets.hovered.corner_radius = radius;
-    v.widgets.active.bg_fill = p.accent_soft;
-    v.widgets.active.weak_bg_fill = p.accent_soft;
+    v.widgets.active.bg_fill = p.accent.gamma_multiply(0.18);
+    v.widgets.active.weak_bg_fill = p.accent.gamma_multiply(0.18);
     v.widgets.active.bg_stroke = Stroke::new(1.0, p.accent);
     v.widgets.active.expansion = 0.0;
     v.widgets.active.corner_radius = radius;
-    v.widgets.open.weak_bg_fill = p.card_hover;
+    v.widgets.open.weak_bg_fill = over;
     v.widgets.open.bg_stroke = Stroke::new(1.0, p.accent);
     v.widgets.open.corner_radius = radius;
+    v.selection.bg_fill = p.accent.gamma_multiply(0.30);
     ctx.set_visuals(v);
     let animation_time = if crate::ui::motion::reduced(ctx) {
         0.0
@@ -552,6 +611,15 @@ pub fn apply_palette(ctx: &egui::Context, theme: UiTheme, p: Palette) {
         s.spacing.button_padding = egui::vec2(12.0, 6.0);
         s.spacing.interact_size.y = tokens::CONTROL;
         s.spacing.menu_margin = egui::Margin::same(6);
+        // Scrollbars: thin capsules that float over content and widen on hover.
+        s.spacing.scroll = egui::style::ScrollStyle {
+            bar_width: 10.0,
+            floating_width: 6.0,
+            floating_allocated_width: 0.0,
+            bar_inner_margin: 3.0,
+            bar_outer_margin: 2.0,
+            ..egui::style::ScrollStyle::floating()
+        };
         s.animation_time = animation_time;
         s.text_styles
             .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));

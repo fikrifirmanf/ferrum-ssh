@@ -1,21 +1,21 @@
 ---
-name: "Ferrum Forge"
-description: "Native desktop SSH workspace in warm iron neutrals with one ember accent, a Prompt F mark, a shared form kit and consistent motion. Approved native implementation."
+name: "Ferrum Liquid Glass"
+description: "Native desktop SSH workspace drawn in liquid glass: floating panes and capsule controls rendered by embun over a warm field, one ember accent, a Prompt F mark, a shared form kit and spring motion. Approved 2026-11-08."
 platforms: ["macOS", "Windows", "Linux"]
 colors:
-  background: "#141416"
-  sidebar: "#101012"
-  surface: "#1C1C1F"
-  surface-hover: "#26262A"
-  terminal: "#0E0E10"
+  background: "#0B0B0E"
+  sidebar: "#141418"
+  surface: "#17171B"
+  surface-hover: "#222228"
+  terminal: "#0C0C0E"
   terminal-text: "#E8E6E1"
-  text-primary: "#F2F0EB"
-  text-secondary: "#ADABA5"
-  text-faint: "#918F89"
+  text-primary: "#F4F2EE"
+  text-secondary: "#B9B6B0"
+  text-faint: "#9A978F"
   accent: "#FF8A4C"
   on-accent: "#1C0D05"
-  selection: "#2E2019"
-  border: "#2E2E33"
+  selection: "#382722"
+  border: "#2A2A2F"
   control-border: "#6E6E76"
   focus: "#FF8A4C"
   success: "#6FD6A0"
@@ -63,14 +63,17 @@ spacing:
   xl: "32px"
   section: "48px"
 rounded:
-  small: "4px"
-  control: "8px"
-  window: "12px"
+  small: "6px"
+  control: "10px"
+  card: "12px"
+  pane: "14px"
+  window: "20px"
+  capsule: "999px"
 components:
   button-primary:
     background: "{colors.accent}"
     text-color: "{colors.on-accent}"
-    radius: "{rounded.control}"
+    radius: "{rounded.capsule}"
     height: "36px"
   input:
     height: "36px"
@@ -79,7 +82,7 @@ components:
   button-secondary:
     background: "{colors.surface}"
     text-color: "{colors.text-primary}"
-    border: "{colors.control-border}"
+    radius: "{rounded.capsule}"
     height: "36px"
   button-ghost:
     text-color: "{colors.text-secondary}"
@@ -98,6 +101,8 @@ motion:
   control: "180ms"
   panel: "240ms"
   exit: "140ms"
+  spring-liquid: "response 0.42s, damping 0.74"
+  spring-touch: "response 0.22s, damping 1.0"
 contrast:
   primary-on-page:
     foreground: text-primary
@@ -175,7 +180,7 @@ contrast:
 
 ## Overview
 
-Ferrum Forge is the approved redesign of the Rust/egui client for people managing several servers. Warm iron surfaces, a single ember accent, the Prompt F mark, Phosphor icons and customizable terminal fonts give it one recognizable look. Native tokens in src/themes.rs are the implementation source of truth; shared widgets live in src/ui/forms.rs and shared timing in src/ui/motion.rs.
+Ferrum Liquid Glass is the approved redesign of the Rust/egui client for people managing several servers. Chrome turns to glass and content stays solid: the title bar, navigation, pages, inspector, controls and overlays are real glass rendered by embun-render on the GPU, over a warm painted field. A single ember accent, the Prompt F mark, Phosphor icons and customizable terminal fonts carry over from Forge. Native tokens in src/themes.rs are the implementation source of truth; the glass lives in src/ui/glass.rs, shared widgets in src/ui/forms.rs and shared timing in src/ui/motion.rs. The proposal canvas is https://claude.ai/artifact/19CWP3n5j2k6C7x18oZVZh.
 
 ## Composition
 
@@ -183,7 +188,7 @@ The host library opens with one toolbar (title, count, search, density, Import, 
 
 ## Colors
 
-Iron (the Dark setting) is the primary interface theme. Light and Midnight retain the same semantic roles and geometry. All theme values are defined in src/themes.rs. Reserve ember for actions, keyboard focus, and selection; never use it for ordinary file rows, measured data or decorative fills. Measured values use the steel data color. Vaults saved with the old blue default move to ember once (Settings::migrate_accent); Cobalt stays available as a choice. Green means a connected session or a reachable TCP port; use different labels for those states. Amber describes a warning or a production environment label. Red indicates failure or a destructive action. Structural dividers are subtle; controls use the stronger control-border token. The terminal theme stays independent of the interface theme.
+Smoke (the Dark setting) is the primary interface theme; Frost (Light) and Midnight are the other two tints of the same glass. Surface tokens are the glass tiers composited over the field's base color, and contrast is checked against the worst case: glass over the hottest point of the heat glow. Selected rows use secondary text, never faint. All theme values are defined in src/themes.rs. Reserve ember for actions, keyboard focus, and selection; never use it for ordinary file rows, measured data or decorative fills. Measured values use the steel data color. Vaults saved with the old blue default move to ember once (Settings::migrate_accent); Cobalt stays available as a choice. Green means a connected session or a reachable TCP port; use different labels for those states. Amber describes a warning or a production environment label. Red indicates failure or a destructive action. Structural dividers are subtle; controls use the stronger control-border token. The terminal theme stays independent of the interface theme.
 
 The native interface uses actual connection state and marks stale health samples. Disposable visual QA uses explicit fixtures and does not probe demo addresses or save the vault. Arbitrary user accent colors still need the existing readable_on logic and contrast validation.
 
@@ -197,7 +202,7 @@ Use a 4 px spacing grid. Navigation is 216 px; its icon rail is 56 px, and the r
 
 ## Components
 
-Use the widgets in src/ui/forms.rs (Btn, Input, address_line, segmented, switch, select, section, reveal, tag_input, command_line) and Phosphor glyphs, with semantic tokens in src/themes.rs. Primary buttons have a solid ember fill; secondary buttons have a strong neutral border; utility actions use text and an icon. Each icon action has a tooltip and an accessible name. Hover changes a surface; selection uses a fill plus a leading marker. Buttons take a 2 px accent outline with a 2 px offset on focus. Inputs warm their border, gain a soft ring and grow a 2 px heat line from the center of the bottom edge. Do not remove keyboard focus states.
+Use the widgets in src/ui/forms.rs (Btn, Input, address_line, segmented, switch, select, section, reveal, tag_input, command_line) and Phosphor glyphs, with semantic tokens in src/themes.rs. Buttons are capsules. Primary buttons are ember-tinted glass; secondary buttons are plain glass; utility actions use text and an icon with a hover wash. Each icon action has a tooltip and an accessible name. Hover changes a surface; selection uses a fill plus a leading marker. Buttons take a 2 px accent outline with a 2 px offset on focus. Inputs warm their border, gain a soft ring and grow a 2 px heat line from the center of the bottom edge. Do not remove keyboard focus states.
 
 Host rows show label, address, protocol, group, and probe result. Serial has no TCP latency. Hosts behind a jump host or proxy show Probe skipped. Unknown and disabled probes show a dash with a reason, never a green dot. Row menus contain edit, duplicate, pin, move, and delete. Keep visible Connect and Edit actions in the inspector; a menu is supplementary.
 
@@ -209,13 +214,21 @@ The container sidebar offers Open manager for a full-width workspace in the curr
 
 State requirements: loading preserves layout and names the operation; empty libraries offer Add host and Import hosts; no matches offer Clear filters; connection errors retain input and offer Retry or Edit host. Authentication failures never report a password value. Host-key changes block connection with old/new fingerprints and an explicit trust decision. Transfer errors retain the file and destination with Retry. Disabled controls explain the unmet prerequisite. Long labels truncate only with an accessible full name; errors and commands wrap. Support keyboard selection and reveal focused rows in long lists.
 
+## Liquid glass
+
+The window is a stack, back to front: the field (base color plus a steel glow in two corners and the ember heat glow), panes (chrome, panel, dense), controls (buttons, lenses, select faces, slider knobs) and overlays (menus, palette, dialogs, toasts). embun-render draws panes over the field, controls over panes, and overlays over panes, on wgpu on every platform, so macOS, Windows and Linux get the same glass. egui draws text, icons and wells on top. Glass that a scroll area clips, that sits inside a popup, or that passes 60 shapes in a pass is painted by egui as tinted glass, so it never leaks outside its pane.
+
+Tiers: chrome (title and status bars, toolbars, thinnest), panel (navigation, page, inspector), overlay (menus, palette, dialogs) and dense (terminal panes, nearly solid). The terminal view paints its scheme background at 80% over dense glass. Primary buttons are fully tinted glass in the accent fill; Frost keeps the bright ember fill with a dark label and uses #9E4513 for ember text. Cards and rows inside a pane are painted glass over glass. Inputs, segment tracks, switch tracks and progress tracks are recessed wells, not glass.
+
+Heat follows focus: the ember glow glides on a spring to the focused thing (the inspector, the active session tab or terminal pane, the open palette, the lock screen). The Glass level slider in Settings (Clear to Tinted, default 0.5) is embun's transparency level. Reduce transparency (a setting, plus the macOS and Windows system preference) draws every pane solid. An unfocused window uses embun's unfocused glass, as macOS does.
+
 ## Graphics & Effects
 
-The mark is Prompt F: the F is the name, the ember `>_` is the job. In the app it is painted from convex polygons (ui::logo_mark), with a simplified drawing below 32 pt. App icon masters are packaging/icons/ferrum-icon.svg and ferrum-icon-small.svg; generate_icons.py renders every PNG and icon.ico. Avoid stock imagery, ornamental charts and translucent panels; gradients belong only to the app icon. Charts are allowed only for measured health samples, with a timestamp and units. No imagery or network fonts are required. A small shadow is reserved for overlays; normal panels use shared edges and borders.
+The mark is Prompt F: the F is the name, the ember `>_` is the job. In the app it is painted from convex polygons (ui::logo_mark), with a simplified drawing below 32 pt. App icon masters are packaging/icons/ferrum-icon.svg and ferrum-icon-small.svg; generate_icons.py renders every PNG and icon.ico. Avoid stock imagery and ornamental charts. Translucency and gradients belong to the glass and the field only, never to text or data. Charts are allowed only for measured health samples, with a timestamp and units. No imagery or network fonts are required. Panels and overlays cast soft shadows from the glass renderer; controls cast none.
 
 ## Motion
 
-One curve (cubic out) and three durations: 120 ms for hover and press, 180 ms for switches, segments and chevrons, 240 ms for sections, inspector, navigation and page entrance. Exits run at 140 ms. Terminal text never animates: a session tool panel reflows the terminal once and only the panel contents fade in. Progress comes from measured bytes. Connection state changes appear immediately with a word. Host-key and credential prompts block at once with no entrance. Reduce motion (a setting, plus the macOS and GNOME system preference) lands every animation on its final value.
+Anything glass that moves rides an embun spring: the selection lens (navigation, segments, session tabs) glides and stretches along its travel like a drop, pressed glass swells and settles with a small overshoot, switch knobs and slider knobs land on the liquid spring, and the heat glow glides to focus. Fades still use one curve (cubic out) and three durations: 120 ms for hover and press, 180 ms for switches, segments and chevrons, 240 ms for sections, inspector, navigation and page entrance. Exits run at 140 ms. Terminal text never animates: a session tool panel reflows the terminal once and only the panel contents fade in. Progress comes from measured bytes. Connection state changes appear immediately with a word. Host-key and credential prompts block at once with no entrance. Reduce motion (a setting, plus the macOS and GNOME system preference) lands every animation on its final value.
 
 ## Guardrails
 

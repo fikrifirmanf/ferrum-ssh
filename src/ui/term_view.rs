@@ -348,7 +348,15 @@ pub fn show(
     }
 
     let painter = ui.painter_at(full);
-    painter.rect_filled(full, 0.0, scheme.bg);
+    // The scheme's background over dense glass: a little of the glass shows at the rim,
+    // the text stays on the scheme's color. Solid with Reduce transparency.
+    let look = super::glass::look(ui.ctx());
+    let alpha = if look.reduce_transparency { 1.0 } else { 0.80 };
+    painter.rect_filled(
+        full,
+        crate::themes::tokens::RADIUS_PANE,
+        scheme.bg.gamma_multiply(alpha),
+    );
 
     let origin = inner.min;
     let to_cell = |pos: Pos2, display_offset: usize| -> (Point, Side, usize, usize) {

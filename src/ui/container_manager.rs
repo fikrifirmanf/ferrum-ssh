@@ -186,16 +186,23 @@ pub fn show(
     let height = if compact {
         (ui.available_height() - 40.0).max(80.0)
     } else {
-        (ui.available_height() * 0.4).clamp(80.0, 280.0)
+        // The details below need about 330 points for a few log lines; the table gives way.
+        (ui.available_height() * 0.4)
+            .min(ui.available_height() - 330.0)
+            .clamp(80.0, 280.0)
     };
     egui::ScrollArea::horizontal()
         .id_salt("container-table-horizontal")
         .show(ui, |ui| {
             ui.set_min_width(820.0);
+            // A soft wash for the selected row, as in the host list, not a solid slab.
+            ui.visuals_mut().selection.bg_fill = pal.accent.gamma_multiply(0.14);
+            ui.visuals_mut().widgets.hovered.weak_bg_fill = super::glass::hover_wash(ui);
             TableBuilder::new(ui)
                 .id_salt("container-table")
                 .striped(false)
                 .sense(Sense::click())
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::remainder().at_least(180.0).clip(true))
                 .column(Column::remainder().at_least(180.0).clip(true))
                 .column(Column::initial(110.0).at_least(90.0).clip(true))
@@ -220,12 +227,22 @@ pub fn show(
                     }
                 })
                 .body(|body| {
-                    body.rows(40.0, rows.len(), |mut row| match &rows[row.index()] {
+                    // Group titles sit close to their rows; containers keep a full row.
+                    let heights = rows.iter().map(|row| match row {
+                        Row::Group(..) => 30.0,
+                        Row::Container(_) => 36.0,
+                    });
+                    body.heterogeneous_rows(heights, |mut row| match &rows[row.index()] {
                         Row::Group(name, count) => {
                             row.col(|ui| {
                                 ui.label(
-                                    RichText::new(format!("{name} ({count})"))
-                                        .family(crate::fonts::semibold()),
+                                    RichText::new(name)
+                                        .size(13.0)
+                                        .family(crate::fonts::semibold())
+                                        .color(pal.text_dim),
+                                );
+                                ui.label(
+                                    RichText::new(count.to_string()).size(13.0).color(pal.faint),
                                 );
                             });
                             for _ in 0..5 {
@@ -233,20 +250,29 @@ pub fn show(
                             }
                         }
                         Row::Container(item) => {
-                            row.set_selected(
-                                browser.manager.selected.as_deref() == Some(&item.key()),
-                            );
+                            let selected = browser.manager.selected.as_deref() == Some(&item.key());
+                            row.set_selected(selected);
                             row.col(|ui| {
-                                if ui
-                                    .selectable_label(
-                                        browser.manager.selected.as_deref() == Some(&item.key()),
-                                        &item.name,
-                                    )
-                                    .on_hover_text(format!("{}\n{}", item.name, item.scope))
-                                    .clicked()
-                                {
-                                    browser.manager.select(item.key());
+                                // The whole row selects; the name carries the same marker as a
+                                // selected host instead of a chip of its own.
+                                if selected {
+                                    let r = ui.max_rect();
+                                    ui.painter().rect_filled(
+                                        egui::Rect::from_min_size(
+                                            egui::pos2(r.left(), r.center().y - 10.0),
+                                            egui::vec2(3.0, 20.0),
+                                        ),
+                                        1.5,
+                                        pal.accent,
+                                    );
                                 }
+                                ui.add_space(12.0);
+                                ui.add(
+                                    egui::Label::new(RichText::new(&item.name).color(pal.text))
+                                        .selectable(false)
+                                        .truncate(),
+                                )
+                                .on_hover_text(format!("{}\n{}", item.name, item.scope));
                             });
                             row.col(|ui| {
                                 ui.label(RichText::new(&item.detail).color(pal.text))
@@ -378,22 +404,23 @@ fn details(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<Com
             }
         }
     });
-    ui.horizontal_wrapped(|ui| {
-        for (tab, label) in [
+    ui.add_space(4.0);
+    let mut tab = browser.manager.tab;
+    if forms::segmented(
+        ui,
+        "container-detail-tab",
+        &mut tab,
+        &[
             (DetailTab::Logs, "Logs"),
             (DetailTab::Stats, "Stats"),
             (DetailTab::Inspect, "Inspect"),
             (DetailTab::Terminal, "Terminal"),
             (DetailTab::Ports, "Ports"),
-        ] {
-            if ui
-                .selectable_label(browser.manager.tab == tab, label)
-                .clicked()
-            {
-                browser.manager.choose_tab(tab);
-            }
-        }
-    });
+        ],
+    ) {
+        browser.manager.choose_tab(tab);
+    }
+    ui.add_space(4.0);
     match browser.manager.tab {
         DetailTab::Logs => {
             ui.horizontal_wrapped(|ui| {
@@ -421,26 +448,32 @@ fn details(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<Com
             let query = browser.manager.log_filter.to_lowercase();
             match &browser.manager.logs {
                 Some(Ok(logs)) => {
-                    egui::ScrollArea::both()
-                        .id_salt(("container-live-logs", item.key()))
-                        .auto_shrink([false, false])
-                        .stick_to_bottom(!browser.manager.pause_logs)
+                    super::glass::well_frame(ui.ctx(), 10)
+                        .inner_margin(egui::Margin::same(10))
                         .show(ui, |ui| {
-                            let filtered = logs
-                                .lines()
-                                .filter(|line| {
-                                    query.is_empty() || line.to_lowercase().contains(&query)
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            if filtered.is_empty() {
-                                ui.label("No matching log lines.");
-                            } else {
-                                ui.add(
-                                    egui::Label::new(RichText::new(filtered).monospace())
-                                        .selectable(true),
-                                );
-                            }
+                            // Leaves room for the well's own margin so the logs end inside the page.
+                            egui::ScrollArea::both()
+                                .id_salt(("container-live-logs", item.key()))
+                                .max_height((ui.available_height() - 24.0).max(40.0))
+                                .auto_shrink([false, false])
+                                .stick_to_bottom(!browser.manager.pause_logs)
+                                .show(ui, |ui| {
+                                    let filtered = logs
+                                        .lines()
+                                        .filter(|line| {
+                                            query.is_empty() || line.to_lowercase().contains(&query)
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    if filtered.is_empty() {
+                                        ui.label("No matching log lines.");
+                                    } else {
+                                        ui.add(
+                                            egui::Label::new(RichText::new(filtered).monospace())
+                                                .selectable(true),
+                                        );
+                                    }
+                                });
                         });
                 }
                 Some(Err(error)) => {

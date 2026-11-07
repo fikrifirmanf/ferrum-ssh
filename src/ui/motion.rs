@@ -1,4 +1,5 @@
-//! Forge motion: three durations and one curve, shared by every animated widget.
+//! Motion: three durations and one curve for fades, plus embun springs for anything glass
+//! that moves (lenses, presses, the heat glow), so travel feels like liquid.
 //!
 //! Terminal text, connection state, host-key warnings and transfer progress never animate.
 //! With Reduce motion on, every helper here lands on its final value at once.
@@ -108,9 +109,93 @@ pub fn since_change(
     emath::easing::cubic_out(t)
 }
 
+// ---------- Liquid springs ----------
+
+pub use embun_motion::Spring;
+
+/// Glass that moves: lenses, selection pills, the heat glow. Lands with a soft overshoot.
+pub const LIQUID: Spring = Spring {
+    response: 0.42,
+    damping_fraction: 0.74,
+};
+/// Hover and press on glass: quick, no overshoot.
+pub const TOUCH: Spring = Spring {
+    response: 0.22,
+    damping_fraction: 1.0,
+};
+/// Panels and sections opening.
+pub const PANEL_SPRING: Spring = Spring {
+    response: 0.36,
+    damping_fraction: 0.9,
+};
+
+#[derive(Clone, Copy)]
+struct SpringState {
+    anim: embun_motion::Animated,
+    time: f64,
+}
+
+/// A spring toward `target`. Returns the current value and its velocity per second.
+/// The first call starts at the target, so opening a screen does not replay motion.
+pub fn spring_with_velocity(ctx: &Context, id: Id, target: f32, spring: Spring) -> (f32, f32) {
+    let now = ctx.input(|i| i.time);
+    if reduced(ctx) {
+        ctx.data_mut(|d| d.remove::<SpringState>(id));
+        return (target, 0.0);
+    }
+    let state = ctx.data_mut(|d| {
+        let s = d.get_temp_mut_or_insert_with(id, || SpringState {
+            anim: embun_motion::Animated::new(target, spring),
+            time: now,
+        });
+        s.anim.target = target;
+        s.anim.spring = spring;
+        let dt = (now - s.time).clamp(0.0, 1.0 / 20.0) as f32;
+        s.time = now;
+        s.anim.step(dt);
+        *s
+    });
+    if !state.anim.is_settled() {
+        ctx.request_repaint();
+    }
+    (state.anim.value, state.anim.velocity)
+}
+
+/// The value of a spring toward `target`. See [`spring_with_velocity`].
+pub fn spring(ctx: &Context, id: Id, target: f32, spring: Spring) -> f32 {
+    spring_with_velocity(ctx, id, target, spring).0
+}
+
+/// 0..1 toward `on` on a spring.
+pub fn spring_bool(ctx: &Context, id: Id, on: bool, s: Spring) -> f32 {
+    spring(ctx, id, if on { 1.0 } else { 0.0 }, s)
+}
+
+/// A rectangle that glides to `target` like liquid: it stretches along its travel and
+/// squeezes across it, in proportion to speed, then settles back to `target`.
+pub fn liquid_rect(ctx: &Context, id: Id, target: egui::Rect) -> egui::Rect {
+    let (x, vx) = spring_with_velocity(ctx, id.with("x"), target.center().x, LIQUID);
+    let (y, vy) = spring_with_velocity(ctx, id.with("y"), target.center().y, LIQUID);
+    let w = spring(ctx, id.with("w"), target.width(), LIQUID);
+    let h = spring(ctx, id.with("h"), target.height(), LIQUID);
+    let stretch = |v: f32| (v.abs() / 2400.0).min(0.18);
+    let (sx, sy) = (stretch(vx), stretch(vy));
+    let size = egui::vec2(w * (1.0 + sx - sy * 0.5), h * (1.0 + sy - sx * 0.5));
+    egui::Rect::from_center_size(egui::pos2(x, y), size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn springs_start_at_the_target_and_snap_with_reduce_motion() {
+        let ctx = Context::default();
+        let id = Id::unique("s");
+        assert_eq!(spring(&ctx, id, 5.0, LIQUID), 5.0);
+        set_user_preference(&ctx, true);
+        assert_eq!(spring(&ctx, id, 9.0, LIQUID), 9.0);
+    }
 
     #[test]
     fn reduce_motion_lands_on_the_final_value_at_once() {

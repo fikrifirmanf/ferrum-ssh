@@ -10,7 +10,7 @@ use egui::{
     Shape, Stroke, StrokeKind, TextEdit, Ui, UiBuilder, Vec2, Widget, WidgetInfo, pos2, vec2,
 };
 
-use super::motion;
+use super::{glass, motion};
 use crate::themes::{Palette, current, tokens};
 
 fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -33,6 +33,19 @@ fn focus_ring(ui: &Ui, rect: Rect, radius: u8, pal: Palette) {
         Stroke::new(2.0, pal.accent),
         StrokeKind::Outside,
     );
+}
+
+/// Multiplies a painted shape's colors by `opacity`, for disabled glass.
+fn fade(shape: &mut Shape, opacity: f32) {
+    match shape {
+        Shape::Rect(r) => {
+            r.fill = r.fill.gamma_multiply(opacity);
+            r.stroke.color = r.stroke.color.gamma_multiply(opacity);
+        }
+        Shape::LineSegment { stroke, .. } => stroke.color = stroke.color.gamma_multiply(opacity),
+        Shape::Vec(v) => v.iter_mut().for_each(|s| fade(s, opacity)),
+        _ => {}
+    }
 }
 
 // ---------- Buttons ----------
@@ -134,63 +147,69 @@ impl Widget for Btn {
             return resp;
         }
         let enabled = ui.is_enabled();
-        let ctx = ui.ctx();
-        let hover = motion::ease(
-            ctx,
+        let ctx = ui.ctx().clone();
+        let hover = motion::spring_bool(
+            &ctx,
             resp.id.with("h"),
             resp.hovered() && enabled,
-            motion::FAST,
+            motion::TOUCH,
         );
-        let press = motion::ease(
-            ctx,
+        // Pressed glass swells and settles back with a small overshoot, like a drop.
+        let press = motion::spring_bool(
+            &ctx,
             resp.id.with("p"),
             resp.is_pointer_button_down_on() && enabled,
-            motion::FAST,
+            motion::LIQUID,
         );
-        let face = rect.translate(vec2(0.0, press));
-        let (fill, stroke, ink) = match (self.kind, enabled) {
-            (Kind::Primary, true) => {
-                let lift = if ui.visuals().dark_mode {
-                    Color32::WHITE
-                } else {
-                    Color32::BLACK
-                };
-                (
-                    lerp(pal.accent, lift, 0.10 * hover),
-                    Color32::TRANSPARENT,
-                    pal.on_accent,
-                )
+        let look = glass::look(&ctx);
+        let radius = rect.height() / 2.0;
+        let tier = match self.kind {
+            Kind::Primary if enabled => Some(glass::Tier::Prominent(pal.accent_fill)),
+            Kind::Secondary | Kind::Danger | Kind::Primary => Some(glass::Tier::Control),
+            Kind::Ghost => None,
+        };
+        let face = match tier {
+            Some(tier) if enabled => glass::control(ui, rect, radius, tier, press),
+            Some(tier) => {
+                let shapes = glass::fallback(rect, radius, tier, &look)
+                    .into_iter()
+                    .map(|mut s| {
+                        fade(&mut s, 0.42);
+                        s
+                    })
+                    .collect::<Vec<_>>();
+                ui.painter().extend(shapes);
+                rect
             }
-            (Kind::Secondary, true) => (
-                lerp(pal.card, pal.card_hover, hover),
-                pal.control_border,
-                pal.text,
-            ),
-            (Kind::Ghost, true) => (
-                pal.card_hover.gamma_multiply(hover),
-                Color32::TRANSPARENT,
-                lerp(pal.text_dim, pal.text, hover),
-            ),
-            (Kind::Danger, true) => (
-                pal.card_hover.gamma_multiply(hover),
-                Color32::TRANSPARENT,
-                pal.danger,
-            ),
-            (_, false) => (pal.card_hover, pal.border, pal.text_dim),
+            None => rect.expand(press * 1.5),
+        };
+        let ink = match (self.kind, enabled) {
+            (Kind::Primary, true) => pal.on_accent_fill,
+            (Kind::Secondary, true) => pal.text,
+            (Kind::Ghost, true) => lerp(pal.text_dim, pal.text, hover),
+            (Kind::Danger, true) => pal.danger,
+            (_, false) => pal.text_dim.gamma_multiply(0.7),
         };
         let ink = self.color.filter(|_| enabled).unwrap_or(ink);
-        let radius = if square { 6 } else { tokens::RADIUS };
         let p = ui.painter();
-        p.rect(
-            face,
-            radius,
-            fill,
-            Stroke::new(1.0, stroke),
-            StrokeKind::Inside,
-        );
+        let wash = match self.kind {
+            Kind::Primary => Color32::from_white_alpha(46),
+            _ => glass::hover_wash(ui),
+        };
+        if hover > 0.0 {
+            p.rect_filled(
+                face,
+                face.height() / 2.0,
+                wash.gamma_multiply(hover.min(1.0)),
+            );
+        }
+        if self.kind == Kind::Danger && enabled {
+            p.rect_filled(face, face.height() / 2.0, pal.danger.gamma_multiply(0.12));
+        }
+        let radius = face.height() / 2.0;
         p.galley(face.center() - galley.size() / 2.0, galley, ink);
         if resp.has_focus() {
-            focus_ring(ui, face, radius, pal);
+            focus_ring(ui, face, radius as u8, pal);
         }
         resp
     }
@@ -267,8 +286,12 @@ pub fn chip(ui: &mut Ui, text: &str, mono: bool, pal: Palette) -> Response {
     let galley = ui
         .painter()
         .layout_no_wrap(text.to_string(), font, pal.text_dim);
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 12.0, 20.0), Sense::hover());
-    ui.painter().rect_filled(rect, 4, pal.card_hover);
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 16.0, 22.0), Sense::hover());
+    ui.painter().extend(glass::card_shapes(
+        rect,
+        rect.height() / 2.0,
+        &glass::look(ui.ctx()),
+    ));
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, pal.text_dim);
     resp
@@ -281,13 +304,17 @@ pub fn kbd(ui: &mut Ui, text: &str, pal: Palette) -> Response {
         FontId::monospace(tokens::CAPTION),
         pal.text_dim,
     );
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 10.0, 20.0), Sense::hover());
-    ui.painter().rect(
-        rect,
-        4,
-        pal.card_hover,
-        Stroke::new(1.0, pal.border),
-        StrokeKind::Inside,
+    let (rect, resp) = ui.allocate_exact_size(
+        vec2((galley.size().x + 10.0).max(20.0), 20.0),
+        Sense::hover(),
+    );
+    ui.painter()
+        .extend(glass::card_shapes(rect, 6.0, &glass::look(ui.ctx())));
+    // A key sits on its baseline: a darker lip along the bottom.
+    ui.painter().hline(
+        (rect.left() + 5.0)..=(rect.right() - 5.0),
+        rect.bottom() - 0.5,
+        Stroke::new(1.0, Color32::from_black_alpha(70)),
     );
     ui.painter()
         .galley(rect.center() - galley.size() / 2.0, galley, pal.text_dim);
@@ -335,20 +362,22 @@ fn paint_chrome(ui: &Ui, id: Id, rect: Rect, c: Chrome, pal: Palette) {
     let heat = motion::ease(ctx, id.with("heat"), c.focused, motion::HEAT);
     let hover = motion::ease(ctx, id.with("hover"), c.hovered && !c.focused, motion::FAST);
     let hot = if c.error { pal.danger } else { pal.accent };
+    let look = glass::look(ctx);
+    let well = glass::well_fill(&look);
     let fill = if c.enabled {
-        lerp(pal.card, pal.card_hover, hover)
+        lerp(well, well.gamma_multiply(1.25), hover)
     } else {
-        pal.card_hover
+        well.gamma_multiply(0.6)
     };
     let rest = if c.error {
         pal.danger
     } else if c.enabled {
-        pal.control_border
+        pal.control_border.gamma_multiply(0.75)
     } else {
         pal.border
     };
     let border = lerp(rest, hot, heat);
-    let radius = tokens::RADIUS;
+    let radius = tokens::RADIUS_INPUT;
     let p = ui.painter();
     if heat > 0.0 {
         let ring = if c.error {
@@ -364,6 +393,9 @@ fn paint_chrome(ui: &Ui, id: Id, rect: Rect, c: Chrome, pal: Palette) {
         );
     }
     p.rect_filled(rect, radius, fill);
+    if !c.inherited {
+        p.add(glass::well_shadow(rect, radius as f32, &look));
+    }
     if c.inherited && heat <= 0.0 && !c.error {
         p.add(Shape::dashed_line(
             &rounded_outline(rect.shrink(0.5), radius as f32),
@@ -884,29 +916,20 @@ fn segmented_sized<T: PartialEq + Clone>(
     let cell = (width - inset * 2.0) / options.len() as f32;
     let (rect, _) = ui.allocate_exact_size(vec2(width, height + inset * 2.0), Sense::hover());
     let track = rect.shrink(0.5);
-    ui.painter().rect(
-        track,
-        tokens::RADIUS,
-        pal.sidebar,
-        Stroke::new(1.0, pal.border),
-        StrokeKind::Inside,
-    );
+    let look = glass::look(ui.ctx());
+    ui.painter()
+        .rect_filled(track, track.height() / 2.0, glass::well_fill(&look));
+    ui.painter()
+        .add(glass::well_shadow(track, track.height() / 2.0, &look));
     let index = options
         .iter()
         .position(|(option, _)| option == value)
         .unwrap_or(0);
-    let at = motion::value(ui.ctx(), id.with("thumb"), index as f32, motion::CONTROL);
     let thumb = Rect::from_min_size(
-        rect.min + vec2(inset + at * cell, inset),
+        rect.min + vec2(inset + index as f32 * cell, inset),
         vec2(cell, height),
     );
-    ui.painter().rect(
-        thumb,
-        6,
-        pal.card_hover,
-        Stroke::new(1.0, pal.border),
-        StrokeKind::Inside,
-    );
+    glass::lens(ui, id.with("lens"), thumb, height / 2.0);
     let mut changed = false;
     for (i, (option, text)) in options.iter().enumerate() {
         let cell_rect = Rect::from_min_size(
@@ -932,7 +955,7 @@ fn segmented_sized<T: PartialEq + Clone>(
             lerp(pal.text_dim, pal.text, warm),
         );
         if resp.has_focus() {
-            focus_ring(ui, cell_rect, 6, pal);
+            focus_ring(ui, cell_rect, (height / 2.0) as u8, pal);
         }
         if resp.clicked() && !selected {
             *value = option.clone();
@@ -942,34 +965,180 @@ fn segmented_sized<T: PartialEq + Clone>(
     changed
 }
 
-/// 34 by 20 pt: the knob and fill move on one clock.
+/// 40 by 24 pt. The knob glides on a liquid spring and stretches while it travels.
 pub fn switch(ui: &mut Ui, on: &mut bool, name: &str) -> Response {
     let pal = current(ui.ctx());
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(34.0, 20.0), Sense::click());
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(SWITCH_W, 24.0), Sense::click());
     if resp.clicked() {
         *on = !*on;
         resp.mark_changed();
     }
     resp.widget_info(|| WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *on, name));
-    let t = motion::ease(ui.ctx(), resp.id.with("t"), *on, motion::CONTROL);
+    let ctx = ui.ctx().clone();
+    let t = motion::ease(&ctx, resp.id.with("t"), *on, motion::CONTROL);
+    let (x, v) = motion::spring_with_velocity(
+        &ctx,
+        resp.id.with("knob"),
+        if *on { 1.0 } else { 0.0 },
+        motion::LIQUID,
+    );
+    let press = motion::spring_bool(
+        &ctx,
+        resp.id.with("p"),
+        resp.is_pointer_button_down_on(),
+        motion::TOUCH,
+    );
+    let look = glass::look(&ctx);
     let p = ui.painter();
+    let well = glass::well_fill(&look);
     p.rect(
         rect,
-        10,
-        lerp(pal.card_hover, pal.accent, t),
-        Stroke::new(1.0, lerp(pal.control_border, pal.accent, t)),
+        12,
+        lerp(well, pal.accent_fill, t),
+        Stroke::new(1.0, lerp(pal.control_border, pal.accent_fill, t)),
         StrokeKind::Inside,
     );
-    p.circle_filled(
-        pos2(rect.left() + 10.0 + 14.0 * t, rect.center().y),
-        6.0,
-        lerp(pal.text_dim, pal.on_accent, t),
+    if t < 1.0 {
+        p.add(glass::well_shadow(rect, 12.0, &look));
+    }
+    // Knob: wider while pressed or moving, the way a liquid drop stretches.
+    let stretch = (v.abs() * 0.9).min(8.0) + press * 5.0;
+    let travel = rect.width() - 24.0;
+    let center = pos2(
+        rect.left() + 12.0 + travel * x.clamp(-0.1, 1.1),
+        rect.center().y,
+    );
+    let knob = Rect::from_center_size(center, vec2(18.0 + stretch, 18.0));
+    let knob = knob.translate(vec2(
+        (rect.left() + 3.0 - knob.left()).max(0.0) + (rect.right() - 3.0 - knob.right()).min(0.0),
+        0.0,
+    ));
+    p.add(
+        egui::epaint::Shadow {
+            offset: [0, 2],
+            blur: 6,
+            spread: 0,
+            color: Color32::from_black_alpha(90),
+        }
+        .as_shape(knob, 9),
+    );
+    p.rect_filled(knob, 9, Color32::from_rgb(250, 249, 247));
+    p.hline(
+        (knob.left() + 6.0)..=(knob.right() - 6.0),
+        knob.bottom() - 1.0,
+        Stroke::new(1.0, Color32::from_black_alpha(20)),
     );
     if resp.has_focus() {
-        focus_ring(ui, rect, 10, pal);
+        focus_ring(ui, rect, 12, pal);
     }
     resp
 }
+
+/// A 0..1 slider with words at both ends. The knob is a drop of glass: it swells while
+/// held and lands on a liquid spring. Arrow keys move it in steps of 0.05.
+pub fn slider(ui: &mut Ui, value: &mut f32, name: &str, low: &str, high: &str) -> Response {
+    let pal = current(ui.ctx());
+    let ctx = ui.ctx().clone();
+    let width = ui.available_width().min(420.0);
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(width, 44.0), Sense::click_and_drag());
+    let track = Rect::from_min_max(
+        pos2(rect.left() + 14.0, rect.top() + 11.0),
+        pos2(rect.right() - 14.0, rect.top() + 17.0),
+    );
+    let before = *value;
+    if let Some(p) = resp.interact_pointer_pos()
+        && (resp.dragged() || resp.clicked())
+    {
+        *value = ((p.x - track.left()) / track.width()).clamp(0.0, 1.0);
+    }
+    if resp.has_focus() {
+        let step = ui.input(|i| {
+            i.num_presses(egui::Key::ArrowRight) as f32 - i.num_presses(egui::Key::ArrowLeft) as f32
+        });
+        if step != 0.0 {
+            *value = ((*value + step * 0.05) * 20.0).round().clamp(0.0, 20.0) / 20.0;
+        }
+    }
+    if *value != before {
+        resp.mark_changed();
+    }
+    let shown = *value;
+    resp.widget_info(|| {
+        let mut info = WidgetInfo::labeled(egui::Role::Slider, ui.is_enabled(), name);
+        info.value = Some(f64::from(shown));
+        info
+    });
+    let look = glass::look(&ctx);
+    let p = ui.painter();
+    p.rect(
+        track,
+        3,
+        glass::well_fill(&look),
+        Stroke::new(1.0, pal.control_border.gamma_multiply(0.6)),
+        StrokeKind::Outside,
+    );
+    let x = motion::spring(&ctx, resp.id.with("x"), *value, motion::LIQUID);
+    let fill = Rect::from_min_max(
+        track.min,
+        pos2(track.left() + track.width() * x, track.bottom()),
+    );
+    p.rect_filled(fill, 3, pal.accent_fill);
+    let held = motion::spring_bool(
+        &ctx,
+        resp.id.with("held"),
+        resp.is_pointer_button_down_on(),
+        motion::LIQUID,
+    );
+    let knob = Rect::from_center_size(
+        pos2(track.left() + track.width() * x, track.center().y),
+        vec2(30.0, 20.0),
+    );
+    ui.painter().add(
+        egui::epaint::Shadow {
+            offset: [0, 2],
+            blur: 8,
+            spread: 0,
+            color: Color32::from_black_alpha(70),
+        }
+        .as_shape(knob, 10),
+    );
+    let face = glass::control(ui, knob, 10.0, glass::Tier::Control, held * 1.6);
+    ui.painter().rect_stroke(
+        face,
+        10,
+        Stroke::new(1.0, Color32::from_black_alpha(36)),
+        StrokeKind::Inside,
+    );
+    if held < 0.5 {
+        // At rest the knob is a solid pebble; held, it turns to clear glass.
+        ui.painter().rect_filled(
+            face,
+            10,
+            Color32::from_rgb(250, 249, 247).gamma_multiply(1.0 - held * 2.0),
+        );
+    }
+    if resp.has_focus() {
+        focus_ring(ui, face, 10, pal);
+    }
+    let caption = FontId::proportional(tokens::CAPTION);
+    ui.painter().text(
+        pos2(track.left(), rect.bottom() - 6.0),
+        Align2::LEFT_BOTTOM,
+        low,
+        caption.clone(),
+        pal.text_dim,
+    );
+    ui.painter().text(
+        pos2(track.right(), rect.bottom() - 6.0),
+        Align2::RIGHT_BOTTOM,
+        high,
+        caption,
+        pal.text_dim,
+    );
+    resp
+}
+
+const SWITCH_W: f32 = 40.0;
 
 /// A switch with its text beside it, for places that used a plain checkbox.
 pub fn check(ui: &mut Ui, on: &mut bool, text: impl ToString) -> Response {
@@ -995,7 +1164,7 @@ pub fn check(ui: &mut Ui, on: &mut bool, text: impl ToString) -> Response {
 pub fn switch_row(ui: &mut Ui, title: &str, note: &str, on: &mut bool) -> Response {
     let pal = current(ui.ctx());
     let width = ui.available_width();
-    let text_width = (width - 50.0).max(80.0);
+    let text_width = (width - SWITCH_W - 16.0).max(80.0);
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 16.0;
         ui.allocate_ui_with_layout(vec2(text_width, 0.0), Layout::top_down(Align::Min), |ui| {
@@ -1008,7 +1177,7 @@ pub fn switch_row(ui: &mut Ui, title: &str, note: &str, on: &mut bool) -> Respon
             }
             ui.add_space(6.0);
         });
-        ui.allocate_ui_with_layout(vec2(34.0, 0.0), Layout::top_down(Align::Min), |ui| {
+        ui.allocate_ui_with_layout(vec2(SWITCH_W, 0.0), Layout::top_down(Align::Min), |ui| {
             ui.add_space(if note.is_empty() { 6.0 } else { 12.0 });
             switch(ui, on, title)
         })
@@ -1063,19 +1232,28 @@ pub fn select(
     let id = ui.scope_id().with(("forge-select", salt));
     let popup_id = egui::Popup::default_response_id(&resp);
     let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
-    paint_chrome(
-        ui,
-        id,
-        rect,
-        Chrome {
-            focused: open || resp.has_focus(),
-            hovered: resp.hovered(),
-            error: false,
-            inherited: false,
-            enabled: ui.is_enabled(),
-        },
-        pal,
+    let press = motion::spring_bool(
+        ui.ctx(),
+        id.with("p"),
+        resp.is_pointer_button_down_on(),
+        motion::LIQUID,
     );
+    let face = glass::control(
+        ui,
+        rect,
+        tokens::RADIUS_INPUT as f32,
+        glass::Tier::Control,
+        press * 0.5,
+    );
+    let hover = motion::ease(ui.ctx(), id.with("h"), resp.hovered() || open, motion::FAST);
+    ui.painter().rect_filled(
+        face,
+        tokens::RADIUS_INPUT,
+        glass::hover_wash(ui).gamma_multiply(hover),
+    );
+    if resp.has_focus() {
+        focus_ring(ui, face, tokens::RADIUS_INPUT, pal);
+    }
     resp.widget_info(|| WidgetInfo::labeled(egui::Role::ComboBox, ui.is_enabled(), shown));
     let font = if mono {
         FontId::monospace(13.0)
@@ -1098,15 +1276,21 @@ pub fn select(
         std::f32::consts::FRAC_PI_2 * (1.0 + 2.0 * turn),
         pal.text_dim,
     );
-    egui::Popup::menu(&resp).width(width).gap(4.0).show(|ui| {
-        ui.set_min_width(width - 12.0);
-        egui::ScrollArea::vertical()
-            .max_height(280.0)
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                items(ui);
+    egui::Popup::menu(&resp)
+        .width(width)
+        .gap(6.0)
+        .frame(egui::Frame::NONE)
+        .show(|ui| {
+            glass::overlay_frame(ui, tokens::RADIUS_PANE as f32, Margin::same(6), |ui| {
+                ui.set_min_width(width - 12.0);
+                egui::ScrollArea::vertical()
+                    .max_height(280.0)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        items(ui);
+                    });
             });
-    });
+        });
     resp
 }
 
@@ -1116,8 +1300,12 @@ pub fn option(ui: &mut Ui, selected: bool, text: &str) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
     resp.widget_info(|| WidgetInfo::selected(egui::Role::ComboBox, true, selected, text));
     let hover = motion::ease(ui.ctx(), resp.id.with("h"), resp.hovered(), motion::FAST);
+    if selected {
+        ui.painter()
+            .rect_filled(rect, 8, pal.accent.gamma_multiply(0.14));
+    }
     ui.painter()
-        .rect_filled(rect, 6, pal.card_hover.gamma_multiply(hover));
+        .rect_filled(rect, 8, glass::hover_wash(ui).gamma_multiply(hover));
     let clip = rect.shrink2(vec2(10.0, 0.0));
     ui.painter().with_clip_rect(clip).text(
         clip.left_center(),
@@ -1212,18 +1400,21 @@ pub fn reveal<R>(ui: &mut Ui, id: Id, open: bool, add: impl FnOnce(&mut Ui) -> R
 
 /// A card holding a fixed group of fields.
 pub fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    let pal = current(ui.ctx());
-    egui::Frame::new()
-        .fill(pal.card)
-        .stroke(Stroke::new(1.0, pal.border))
-        .corner_radius(tokens::RADIUS_LARGE)
+    let slot = ui.painter().add(Shape::Noop);
+    let inner = egui::Frame::NONE
         .inner_margin(Margin::same(16))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 12.0;
             add(ui)
-        })
-        .inner
+        });
+    let shapes = glass::card_shapes(
+        inner.response.rect,
+        tokens::RADIUS_LARGE as f32,
+        &glass::look(ui.ctx()),
+    );
+    ui.painter().set(slot, Shape::Vec(shapes));
+    inner.inner
 }
 
 /// A card that folds. While closed it keeps a one-line summary in its header.
@@ -1256,7 +1447,7 @@ pub fn section(
         ui.painter().rect_filled(
             rect.shrink(1.0),
             tokens::RADIUS_LARGE,
-            pal.card_hover.gamma_multiply(hover),
+            glass::hover_wash(ui).gamma_multiply(hover),
         );
         chevron(
             ui,
@@ -1313,12 +1504,10 @@ pub fn section(
     let rect = Rect::from_min_size(top, vec2(width, (body_gap - top.y).max(48.0)));
     ui.painter().set(
         layer,
-        Shape::Rect(egui::epaint::RectShape::new(
+        Shape::Vec(glass::card_shapes(
             rect,
-            tokens::RADIUS_LARGE,
-            pal.card,
-            Stroke::new(1.0, pal.border),
-            StrokeKind::Inside,
+            tokens::RADIUS_LARGE as f32,
+            &glass::look(ui.ctx()),
         )),
     );
 }
@@ -1452,8 +1641,12 @@ fn tag_chip(ui: &mut Ui, tag: &str, pal: Palette) -> bool {
         FontId::proportional(tokens::CAPTION),
         pal.text_dim,
     );
-    let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 28.0, 22.0), Sense::hover());
-    ui.painter().rect_filled(rect, 4, pal.card_hover);
+    let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 30.0, 24.0), Sense::hover());
+    ui.painter().extend(glass::card_shapes(
+        rect,
+        rect.height() / 2.0,
+        &glass::look(ui.ctx()),
+    ));
     ui.painter().galley(
         pos2(rect.left() + 6.0, rect.center().y - galley.size().y / 2.0),
         galley,
@@ -1478,13 +1671,13 @@ pub fn command_line(ui: &mut Ui, command: &str) -> bool {
     let id = ui.scope_id().with("forge-command");
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, 44.0), Sense::hover());
-    ui.painter().rect(
+    let look = glass::look(ui.ctx());
+    ui.painter().extend(glass::fallback(
         rect,
-        tokens::RADIUS,
-        pal.well,
-        Stroke::new(1.0, pal.border),
-        StrokeKind::Inside,
-    );
+        tokens::RADIUS_LARGE as f32,
+        glass::Tier::Dense,
+        &look,
+    ));
     ui.painter().text(
         rect.left_center() + vec2(14.0, 0.0),
         Align2::LEFT_CENTER,

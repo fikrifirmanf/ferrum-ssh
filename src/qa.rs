@@ -8,8 +8,8 @@ use crate::app::{App, Page, Tab};
 use crate::model::{Group, Host, PortForward, Protocol, SshKey};
 
 pub struct Qa {
-    steps: Vec<String>,
-    step: usize,
+    pub steps: Vec<String>,
+    pub step: usize,
     frames: u32,
     waiting: bool,
     shot: Arc<parking_lot::Mutex<Option<Arc<egui::ColorImage>>>>,
@@ -684,6 +684,8 @@ impl App {
                 browser.manager.last_detail_poll = f64::MAX;
                 tab.containers = browser;
             }
+            // Points at Workspaces in the collapsed rail (see `raw_input_hook`).
+            "railhover" => {}
             "connectionscroll" => {
                 if let Some(qa) = &mut self.qa {
                     qa.keys
@@ -766,10 +768,14 @@ impl App {
                     .and_then(|id| self.tabs.iter_mut().find(|t| t.id() == id))
                 {
                     t.side_panel = Some(crate::app::SidePanel::Containers);
+                    t.containers.manager.open = false;
                 }
             }
             "dark" => self.vault.settings.ui_theme = crate::model::UiTheme::Dark,
             "midnight" => self.vault.settings.ui_theme = crate::model::UiTheme::Midnight,
+            "glassclear" => self.vault.settings.glass_level = 0.0,
+            "glasstinted" => self.vault.settings.glass_level = 1.0,
+            "solid" => self.vault.settings.reduce_transparency = true,
             "light" => {
                 self.vault.settings.ui_theme = crate::model::UiTheme::Light;
             }

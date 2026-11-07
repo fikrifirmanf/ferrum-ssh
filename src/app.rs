@@ -300,6 +300,7 @@ pub struct App {
     pub style_key: (UiTheme, [u8; 3]),
     /// The palette drawn this frame; differs from the settings during a theme crossfade.
     pub live_pal: Palette,
+    pub glass: crate::ui::glass::Gpu,
     /// Where a running theme crossfade started from.
     pub style_fade: Option<(Palette, f64)>,
     pub font_key: String,
@@ -403,6 +404,7 @@ impl App {
             last_activity: Instant::now(),
             style_key: (UiTheme::Dark, [0, 0, 0]),
             live_pal: themes::palette(UiTheme::Dark, themes::DEFAULT_ACCENT),
+            glass: Default::default(),
             style_fade: None,
             font_key: String::from("\u{0}"),
             history_filter: String::new(),
@@ -1384,8 +1386,12 @@ impl App {
             self.biometric_tried = true;
             self.start_biometric_unlock(ui.ctx());
         }
+        crate::ui::glass::heat(
+            ui.ctx(),
+            ui.ctx().viewport_rect().shrink2(egui::vec2(300.0, 200.0)),
+        );
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(pal.bg))
+            .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.24);
@@ -1464,13 +1470,16 @@ impl App {
         use crate::ui::forms;
         let pal = self.pal();
         egui::Panel::bottom("status")
+            .show_separator_line(false)
             .exact_size(crate::themes::tokens::STATUS)
-            .frame(
-                egui::Frame::new()
-                    .fill(crate::ui::chrome_fill(pal.sidebar))
-                    .inner_margin(egui::Margin::symmetric(12, 0)),
-            )
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| {
+                crate::ui::glass::pane_behind(
+                    ui,
+                    egui::Margin::symmetric(12, 0),
+                    0.0,
+                    crate::ui::glass::Tier::Chrome,
+                );
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 16.0;
                     let live = self
@@ -1551,9 +1560,9 @@ impl App {
                             "status-theme",
                             &mut theme,
                             &[
-                                (crate::model::UiTheme::Dark, "Iron"),
+                                (crate::model::UiTheme::Dark, "Smoke"),
                                 (crate::model::UiTheme::Midnight, "Midnight"),
-                                (crate::model::UiTheme::Light, "Light"),
+                                (crate::model::UiTheme::Light, "Frost"),
                             ],
                         ) {
                             self.vault.settings.ui_theme = theme;
@@ -1603,7 +1612,13 @@ impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         if let Some(qa) = self.qa.as_mut() {
             raw.events.append(&mut qa.keys);
-            raw.events.push(egui::Event::PointerGone);
+            // Steps that check a hover keep the pointer where the step put it.
+            if qa.steps.get(qa.step).map(String::as_str) == Some("railhover") {
+                raw.events
+                    .push(egui::Event::PointerMoved(egui::pos2(32.0, 127.0)));
+            } else {
+                raw.events.push(egui::Event::PointerGone);
+            }
         }
         #[cfg(target_os = "macos")]
         while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
@@ -1640,6 +1655,29 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.ensure_style(&ctx);
+        crate::ui::glass::begin_frame(&ctx, self.glass_look());
+        crate::ui::CARD_CTX.with(|c| *c.borrow_mut() = Some(ctx.clone()));
+        self.frame_ui(ui, frame);
+        self.glass.end_frame(&ctx, frame);
+    }
+
+    fn on_exit(&mut self) {
+        if self.loaded {
+            let _ = self.store.save(&self.vault);
+        }
+        for t in &self.tabs {
+            if let Tab::Terminal(tt) = t {
+                for p in &tt.panes {
+                    p.session.send_input(crate::term::Input::Close);
+                }
+            }
+        }
+    }
+}
+
+impl App {
+    fn frame_ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         self.updater.poll();
         self.application_menus(ui);
         frame.set_traffic_lights_position(
@@ -1717,16 +1755,20 @@ impl eframe::App for App {
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if self.loaded {
-            let _ = self.store.save(&self.vault);
-        }
-        for t in &self.tabs {
-            if let Tab::Terminal(tt) = t {
-                for p in &tt.panes {
-                    p.session.send_input(crate::term::Input::Close);
-                }
-            }
+    fn glass_look(&self) -> crate::ui::glass::Look {
+        let s = &self.vault.settings;
+        let pal = self.live_pal;
+        let light = s.ui_theme == UiTheme::Light;
+        crate::ui::glass::Look {
+            level: s.glass_level.clamp(0.0, 1.0),
+            reduce_transparency: s.reduce_transparency
+                || crate::ui::glass::system_reduces_transparency(),
+            dark: !light,
+            base: pal.bg,
+            heat: pal.accent,
+            heat_alpha: if light { 0.25 } else { 0.20 },
+            steel: pal.steel,
+            steel_alpha: if light { 0.30 } else { 0.14 },
         }
     }
 }

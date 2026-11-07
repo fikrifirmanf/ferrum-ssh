@@ -382,7 +382,7 @@ impl App {
         let hover = motion::ease(ctx, id.with("h"), resp.hovered(), motion::FAST);
         let open = motion::ease_panel(ctx, id.with("turn"), !closed);
         let p = ui.painter();
-        p.rect_filled(rect, 6, pal.card.gamma_multiply(hover));
+        p.rect_filled(rect, 8, super::glass::hover_wash(ui).gamma_multiply(hover));
         let ink = pal.text_dim.lerp_to_gamma(pal.text, hover);
         forms::chevron(
             ui,
@@ -622,8 +622,8 @@ impl App {
             let compact = rect.height() < (tokens::ROW + tokens::COMPACT_ROW) / 2.0;
             let wide = rect.width() > 760.0;
             let p = ui.painter();
-            p.rect_filled(rect, 8, pal.card.gamma_multiply(hover));
-            p.rect_filled(rect, 8, pal.accent_soft.gamma_multiply(warm));
+            p.rect_filled(rect, 10, super::glass::hover_wash(ui).gamma_multiply(hover));
+            p.rect_filled(rect, 10, pal.accent.gamma_multiply(0.14 * warm));
             if marker > 0.0 {
                 let half = (rect.height() / 2.0 - 10.0) * marker;
                 p.vline(
@@ -645,7 +645,7 @@ impl App {
                 egui::pos2(rect.left() + 12.0 + icon_size / 2.0, rect.center().y),
                 Vec2::splat(icon_size),
             );
-            p.rect_filled(icon_rect, 8, pal.card_hover);
+            p.rect_filled(icon_rect, 8, super::glass::hover_wash(ui));
             p.text(
                 icon_rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -740,7 +740,7 @@ impl App {
                         egui::pos2(x, rect.center().y - 10.0),
                         Vec2::new(galley.size().x + 12.0, 20.0),
                     );
-                    clip.rect_filled(chip, 4, pal.card_hover);
+                    clip.rect_filled(chip, 9, super::glass::hover_wash(ui));
                     x = chip.right() + 4.0;
                     clip.galley(chip.center() - galley.size() / 2.0, galley, pal.text_dim);
                 }
@@ -754,7 +754,7 @@ impl App {
                 egui::pos2(chip_left, rect.center().y - 10.0),
                 Vec2::new(chip_galley.size().x + 12.0, 20.0),
             );
-            p.rect_filled(chip, 4, pal.card_hover);
+            p.rect_filled(chip, 9, super::glass::hover_wash(ui));
             p.galley(
                 chip.center() - chip_galley.size() / 2.0,
                 chip_galley,
@@ -973,10 +973,7 @@ impl App {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let (probe, color) = self.host_probe_label(&host);
-                        egui::Frame::new()
-                            .fill(pal.card)
-                            .stroke(Stroke::new(1.0, pal.border))
-                            .corner_radius(8)
+                        super::glass::card_frame(ui.ctx(), crate::themes::tokens::RADIUS_LARGE)
                             .inner_margin(egui::Margin::same(12))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
