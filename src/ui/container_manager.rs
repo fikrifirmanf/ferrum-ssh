@@ -195,8 +195,8 @@ pub fn show(
         .id_salt("container-table-horizontal")
         .show(ui, |ui| {
             ui.set_min_width(820.0);
-            // A soft wash for the selected row, as in the host list, not a solid slab.
-            ui.visuals_mut().selection.bg_fill = pal.accent.gamma_multiply(0.14);
+            // The same flat, neutral fill as a selected host row, not a solid slab.
+            ui.visuals_mut().selection.bg_fill = super::glass::selection_fill(ui);
             ui.visuals_mut().widgets.hovered.weak_bg_fill = super::glass::hover_wash(ui);
             TableBuilder::new(ui)
                 .id_salt("container-table")

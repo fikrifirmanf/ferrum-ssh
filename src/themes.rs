@@ -420,10 +420,11 @@ pub fn palette(theme: UiTheme, rgb: [u8; 3]) -> Palette {
         steel,
         well,
     ) = match theme {
-        // Smoke. Surfaces are the glass tiers composited over the field's base color.
+        // Smoke. bg is the page, sidebar the tab bar, sidebar and status bar, panel the
+        // inspector: flat surfaces split by hairlines.
         UiTheme::Dark => (
-            0x0b0b0e, 0x141418, 0x17171b, 0x222228, 0x2a2a2f, 0xf4f2ee, 0xb9b6b0, 0x9a978f,
-            0x6e6e76, 0x6fd6a0, 0xebc85a, 0xf7808c, 0x8fb6dc, 0x121215,
+            0x141416, 0x1d1d20, 0x18181a, 0x26262a, 0x2c2c31, 0xececee, 0xa3a3ab, 0x8b8b93,
+            0x6e6e76, 0x5bd08a, 0xebc85a, 0xf47174, 0x86aeea, 0x0e0e10,
         ),
         UiTheme::Midnight => (
             0x07090d, 0x0f1218, 0x12151c, 0x1b1f28, 0x242934, 0xeef1f6, 0xa6aebd, 0x8790a2,
@@ -431,15 +432,15 @@ pub fn palette(theme: UiTheme, rgb: [u8; 3]) -> Palette {
         ),
         // Frost.
         UiTheme::Light => (
-            0xe9e7e3, 0xf4f3f1, 0xf6f5f4, 0xffffff, 0xdcd9d3, 0x17171a, 0x4a4844, 0x5f5c57,
-            0x8a867d, 0x17683f, 0x765500, 0xa11f30, 0x2a5780, 0xfbfaf9,
+            0xffffff, 0xf2f1ef, 0xfaf9f8, 0xebeae7, 0xdcd9d3, 0x1a1a1c, 0x5d5d65, 0x6b6b73,
+            0x8a867d, 0x17683f, 0x765500, 0xc93a3e, 0x2f64b5, 0xf6f5f3,
         ),
     };
     // The three named accents have tuned tones per theme; anything else adapts below.
     let (tuned, tuned_soft) = match (theme, rgb) {
-        (UiTheme::Dark, DEFAULT_ACCENT) => (0xff8a4c, Some(0x382722)),
+        (UiTheme::Dark, DEFAULT_ACCENT) => (0xff9356, Some(0x3a2a22)),
         (UiTheme::Midnight, DEFAULT_ACCENT) => (0xff9259, Some(0x2a1c16)),
-        (UiTheme::Light, DEFAULT_ACCENT) => (0x9e4513, Some(0xf7e6dc)),
+        (UiTheme::Light, DEFAULT_ACCENT) => (0xb04a12, Some(0xf7e6dc)),
         (UiTheme::Light, COBALT_ACCENT) => (0x2f52c9, Some(0xdee5fb)),
         (UiTheme::Light, PATINA_ACCENT) => (0x0f6f5c, Some(0xd5eee8)),
         (_, COBALT_ACCENT) => (0x789aff, Some(0x222a42)),
@@ -530,7 +531,7 @@ pub fn apply_palette(ctx: &egui::Context, theme: UiTheme, p: Palette) {
     };
     let radius = CornerRadius::same(tokens::RADIUS_INPUT);
     let light = theme == UiTheme::Light;
-    // Panels are glass now; anything egui fills on its own gets overlay glass.
+    // Surfaces are painted by the glass layer; anything egui fills on its own gets overlay glass.
     v.panel_fill = Color32::TRANSPARENT;
     v.window_fill = if light {
         Color32::from_rgba_unmultiplied(255, 255, 255, 222)
@@ -538,7 +539,7 @@ pub fn apply_palette(ctx: &egui::Context, theme: UiTheme, p: Palette) {
         Color32::from_rgba_unmultiplied(36, 36, 42, 222)
     };
     v.extreme_bg_color = if light {
-        Color32::from_white_alpha(190)
+        Color32::from_black_alpha(15)
     } else {
         Color32::from_black_alpha(64)
     };

@@ -1,37 +1,38 @@
-//! Liquid glass.
+//! Liquid glass, kept to small things.
 //!
 //! The window is a stack, back to front:
 //!
-//! 1. **Field**: a painted backdrop of one base color and soft glows. The ember "heat" glow
-//!    glides on a spring to whatever has focus ([`heat`]).
-//! 2. **Panes**: chrome, panels and the dense terminal pane, drawn as real glass over the field
-//!    by `embun-render`.
-//! 3. **Controls**: buttons, segment lenses and chips, glass over the panes.
-//! 4. **Overlays**: menus, palettes and dialogs, glass over everything below, each painted
-//!    as its own crop so it sits above the content it covers.
+//! 1. **Field**: the window's base color. It shows only where no surface covers it.
+//! 2. **Surfaces**: the tab bar, sidebar, page, inspector and status bar. They are flat and
+//!    flush, one solid color each, split by hairlines. They go through the same embun pass as
+//!    glass, with every glass layer turned off, so the controls above can sit on them.
+//! 3. **Controls**: buttons, the selected tab, search fields, segment lenses, switch knobs and
+//!    small cards, real glass over the surfaces.
+//! 4. **Overlays**: menus, palettes, toasts and dialogs, glass over everything below, each
+//!    painted as its own crop so it sits above the content it covers.
 //!
-//! egui draws all text, icons and wells on top. Steps 2 to 4 run on the GPU at the end of the
-//! frame ([`Gpu::end_frame`]); the result is the window background. A shape the GPU cannot take
-//! (clipped by a scroll area, inside a popup, past the per-pass limit, or before the first GPU
-//! frame) is painted by egui as tinted glass instead, so nothing ever leaks outside its pane.
+//! egui draws all text, icons, groups and wells on top. Steps 2 to 4 run on the GPU at the end
+//! of the frame ([`Gpu::end_frame`]); the result is the window background. A shape the GPU
+//! cannot take (clipped by a scroll area, inside a popup, past the per-pass limit, or before
+//! the first GPU frame) is painted by egui instead, so nothing ever leaks outside its surface.
+//!
+//! Only top-level, non-overlapping regions should be surfaces. Anything inside one (a group,
+//! a card, a well) is painted by egui with a translucent fill, so glass controls inside it
+//! still show through.
 
 use eframe::egui_wgpu::{self, wgpu};
 use egui::{Color32, Context, Id, LayerId, Pos2, Rect, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
-use embun_render::{Backdrop, Frame, GlassLayers, GlassParams, GlassRenderer, GlassShape};
+use embun_render::{Backdrop, Frame, GlassLayers, GlassParams, GlassRenderer, GlassShape, Tint};
 
 use super::motion;
 
-/// How thick a piece of glass is. Thicker glass hides more of what is behind it.
+/// What a shape is made of.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Tier {
-    /// Title bar, status bar, toolbars: the thinnest glass.
-    Chrome,
-    /// Sidebar, inspector, lists, cards.
-    Panel,
-    /// Menus, palettes, dialogs, tooltips.
+    /// A flat, solid surface in this color: the tab bar, sidebar, page, inspector, status bar.
+    Surface(Color32),
+    /// Menus, palettes, dialogs, toasts, tooltips.
     Overlay,
-    /// Terminal and other long-reading surfaces: nearly solid.
-    Dense,
     /// A plain glass control.
     Control,
     /// A filled control in this color, such as the primary button.
@@ -82,7 +83,6 @@ struct FrameGlass {
     panes: Vec<GlassShape>,
     controls: Vec<GlassShape>,
     overlays: Vec<GlassShape>,
-    heat_target: Option<Rect>,
 }
 
 impl Default for FrameGlass {
@@ -94,7 +94,6 @@ impl Default for FrameGlass {
             panes: Vec::new(),
             controls: Vec::new(),
             overlays: Vec::new(),
-            heat_target: None,
         }
     }
 }
@@ -171,19 +170,6 @@ fn default_heat(screen: Rect) -> Rect {
     )
 }
 
-/// Moves the ember heat glow behind `rect` (the focused host, the active tab, an open dialog).
-/// The last call in a frame wins; the glow glides there on a spring.
-pub fn heat(ctx: &Context, rect: Rect) {
-    let screen = ctx.viewport_rect();
-    let size = vec2(
-        (rect.width() * 1.6).clamp(screen.width() * 0.3, screen.width() * 0.7),
-        (rect.height() * 3.0).clamp(screen.height() * 0.3, screen.height() * 0.6),
-    );
-    let glow = Rect::from_center_size(rect.center(), size);
-    ctx.data_mut(|d| d.insert_temp(heat_target_id(), glow));
-    with_frame(ctx, |f| f.heat_target = Some(glow));
-}
-
 fn to_shape(rect: Rect, radius: f32, tier: Tier, look: &Look, group: u32) -> GlassShape {
     let mut shape = GlassShape::new(
         [rect.center().x, rect.center().y],
@@ -200,23 +186,97 @@ fn to_shape(rect: Rect, radius: f32, tier: Tier, look: &Look, group: u32) -> Gla
         ]
     };
     shape = match tier {
-        Tier::Prominent(c) => shape.tint(rgb(c), 1.0),
-        Tier::Dense => shape.tint(rgb(dense_color(look)), 0.9),
-        // Panes carry a little of the theme's ink so text sits on calm glass, as proposed.
-        Tier::Panel => shape.tint(rgb(dense_color(look)), if look.dark { 0.55 } else { 0.35 }),
-        Tier::Chrome => shape.tint(rgb(dense_color(look)), if look.dark { 0.40 } else { 0.25 }),
+        // The surface pass draws a fully tinted shape as exactly its tint: a flat fill.
+        Tier::Prominent(c) | Tier::Surface(c) => shape.tint(rgb(c), 1.0),
         Tier::Overlay => shape.tint(rgb(overlay_color(look)), 0.35),
-        _ => shape,
+        Tier::Control => shape,
     };
     shape
 }
 
-fn dense_color(look: &Look) -> Color32 {
+/// Shader inputs for the surface pass: no frost, bending, rim, outline or highlight, and a
+/// tint that is the color itself, so each surface comes out as one solid color.
+fn flat_params() -> GlassParams {
+    let off = GlassLayers {
+        frost: false,
+        lensing: false,
+        rim: false,
+        fringe: false,
+        shadow: false,
+        merge: false,
+    };
+    let mut p = GlassParams::from_level(embun_render::DEFAULT_LEVEL, off, true);
+    p.lensing = 0.0;
+    p.rim = 0.0;
+    p.fringe = 0.0;
+    p.shadow = 0.0;
+    p.merge_k = 0.0;
+    p.outline = [0.0; 2];
+    p.outline_ends = [0.0; 2];
+    p.highlight = [0.0; 2];
+    p.tint = Some(
+        [Tint {
+            amount: 1.0,
+            offset: 0.0,
+            gain: 0.0,
+            curve: 0.0,
+        }; 2],
+    );
+    p
+}
+
+/// The hairline between two surfaces, and around groups.
+pub fn hairline(look: &Look) -> Color32 {
     if look.dark {
-        Color32::from_rgb(12, 12, 14)
+        Color32::from_white_alpha(18)
     } else {
-        Color32::from_rgb(251, 250, 248)
+        Color32::from_black_alpha(20)
     }
+}
+
+/// Fill of a selected sidebar item or row: flat, not glass.
+pub fn selection_fill(ui: &Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_white_alpha(19)
+    } else {
+        Color32::from_black_alpha(15)
+    }
+}
+
+/// Which edge of a surface carries its hairline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Edge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// A flat surface behind a whole panel, with a hairline on `edge`. Call first inside the
+/// panel's `show`, passing the frame's inner margin.
+pub fn surface_behind(ui: &Ui, margin: egui::Margin, color: Color32, edge: Option<Edge>) -> Rect {
+    let r = ui.max_rect();
+    let rect = Rect::from_min_max(
+        r.min - vec2(margin.left as f32, margin.top as f32),
+        r.max + vec2(margin.right as f32, margin.bottom as f32),
+    );
+    pane(ui, rect, 0.0, Tier::Surface(color));
+    if let Some(edge) = edge {
+        edge_line(ui, rect, edge);
+    }
+    rect
+}
+
+/// The hairline along one edge of `rect`, drawn just inside it.
+pub fn edge_line(ui: &Ui, rect: Rect, edge: Edge) {
+    let stroke = Stroke::new(1.0, hairline(&look(ui.ctx())));
+    let p = ui.painter().with_clip_rect(rect.expand(1.0));
+    match edge {
+        Edge::Top => p.hline(rect.x_range(), rect.top() + 0.5, stroke),
+        Edge::Bottom => p.hline(rect.x_range(), rect.bottom() - 0.5, stroke),
+        Edge::Left => p.vline(rect.left() + 0.5, rect.y_range(), stroke),
+        Edge::Right => p.vline(rect.right() - 0.5, rect.y_range(), stroke),
+    };
 }
 
 fn overlay_color(look: &Look) -> Color32 {
@@ -231,7 +291,7 @@ fn gpu_can_take(ui: &Ui, rect: Rect) -> bool {
     ui.layer_id().order == egui::Order::Background && ui.clip_rect().expand(0.5).contains_rect(rect)
 }
 
-/// A pane of glass behind `rect`: chrome, panel or dense. Call before drawing its content.
+/// A surface behind `rect`. Call before drawing its content.
 pub fn pane(ui: &Ui, rect: Rect, radius: f32, tier: Tier) {
     let ctx = ui.ctx();
     let taken = gpu_can_take(ui, rect)
@@ -276,23 +336,13 @@ pub fn control(ui: &Ui, rect: Rect, radius: f32, tier: Tier, swell: f32) -> Rect
     face
 }
 
-/// Glass behind a whole panel. Call first inside a panel's `show`, passing the frame's inner
-/// margin, so the pane covers the panel and not only its content area.
-pub fn pane_behind(ui: &Ui, margin: egui::Margin, radius: f32, tier: Tier) {
-    let r = ui.max_rect();
-    let rect = Rect::from_min_max(
-        r.min - vec2(margin.left as f32, margin.top as f32),
-        r.max + vec2(margin.right as f32, margin.bottom as f32),
-    );
-    pane(ui, rect, radius, tier);
-}
-
 /// The faint wash a glass control gains on hover.
 pub fn hover_wash(ui: &Ui) -> Color32 {
     if ui.visuals().dark_mode {
         Color32::from_white_alpha(16)
     } else {
-        Color32::from_white_alpha(110)
+        // The light page is white, so a light wash would vanish on it.
+        Color32::from_black_alpha(12)
     }
 }
 
@@ -362,48 +412,15 @@ pub fn overlay_frame<R>(
     inner
 }
 
-/// Lays out `add` on a pane of glass with `margin` inside it. Use for panels and cards.
-pub fn pane_frame<R>(
-    ui: &mut Ui,
-    tier: Tier,
-    radius: f32,
-    margin: egui::Margin,
-    add: impl FnOnce(&mut Ui) -> R,
-) -> egui::InnerResponse<R> {
-    let slot = ui.painter().add(Shape::Noop);
-    let inner = egui::Frame::NONE.inner_margin(margin).show(ui, add);
-    let rect = inner.response.rect;
-    let ctx = ui.ctx().clone();
-    let taken = gpu_can_take(ui, rect)
-        && with_frame(&ctx, |f| {
-            if !f.ready || f.panes.len() >= PER_PASS {
-                return false;
-            }
-            let shape = to_shape(rect, radius, tier, &f.look, f.panes.len() as u32);
-            f.panes.push(shape);
-            true
-        });
-    if !taken {
-        ui.painter()
-            .set(slot, Shape::Vec(fallback(rect, radius, tier, &look(&ctx))));
-    }
-    inner
-}
-
 // ---------- Painted glass ----------
 
 /// Fill of each tier when egui paints the glass itself.
 pub fn tier_fill(tier: Tier, look: &Look) -> Color32 {
     let (rgb, alpha) = match (tier, look.dark) {
-        (Tier::Chrome, true) => ([28, 28, 33], 0.55),
-        (Tier::Panel, true) => ([30, 30, 35], 0.62),
+        (Tier::Surface(c), _) => return c,
         (Tier::Overlay, true) => ([36, 36, 42], 0.86),
-        (Tier::Dense, true) => ([12, 12, 14], 0.92),
         (Tier::Control, true) => ([255, 255, 255], 0.08),
-        (Tier::Chrome, false) => ([255, 255, 255], 0.50),
-        (Tier::Panel, false) => ([255, 255, 255], 0.60),
         (Tier::Overlay, false) => ([255, 255, 255], 0.86),
-        (Tier::Dense, false) => ([251, 250, 248], 0.94),
         (Tier::Control, false) => ([255, 255, 255], 0.70),
         (Tier::Prominent(c), _) => ([c.r(), c.g(), c.b()], 1.0),
     };
@@ -429,7 +446,6 @@ pub fn tier_fill(tier: Tier, look: &Look) -> Color32 {
 fn shadow(rect: Rect, radius: f32, look: &Look, tier: Tier) -> Shape {
     let (offset, blur, alpha) = match tier {
         Tier::Overlay => (24, 60, if look.dark { 128 } else { 51 }),
-        Tier::Panel => (12, 32, if look.dark { 80 } else { 26 }),
         _ => (0, 0, 0),
     };
     if alpha == 0 {
@@ -454,6 +470,9 @@ fn shadow(rect: Rect, radius: f32, look: &Look, tier: Tier) -> Shape {
 pub fn fallback(rect: Rect, radius: f32, tier: Tier, look: &Look) -> Vec<Shape> {
     let radius = radius.min(rect.height() / 2.0).min(rect.width() / 2.0);
     let fill = tier_fill(tier, look);
+    if let Tier::Surface(_) = tier {
+        return vec![Shape::rect_filled(rect, radius, fill)];
+    }
     let (rim, top) = if look.dark {
         (Color32::from_white_alpha(22), Color32::from_white_alpha(40))
     } else {
@@ -477,66 +496,30 @@ pub fn fallback(rect: Rect, radius: f32, tier: Tier, look: &Look) -> Vec<Shape> 
     shapes
 }
 
-/// A card inside a pane: glass over glass, painted so it stays put while its list scrolls.
-pub fn card_shapes(rect: Rect, radius: f32, look: &Look) -> Vec<Shape> {
-    let (fill, rim, top) = if look.reduce_transparency {
-        let fill = if look.dark {
-            look.base.lerp_to_gamma(Color32::WHITE, 0.10)
-        } else {
-            Color32::WHITE
-        };
-        (
-            fill,
-            Color32::from_gray(if look.dark { 70 } else { 210 }),
-            Color32::TRANSPARENT,
-        )
-    } else if look.dark {
-        (
-            Color32::from_white_alpha(9),
-            Color32::from_white_alpha(20),
-            Color32::from_white_alpha(34),
-        )
+/// Fill and border of a flat group inside a surface. The fill is translucent so glass
+/// controls inside the group (switches, buttons) still show through it.
+fn group_colors(look: &Look) -> (Color32, Color32) {
+    let fill = if look.dark {
+        Color32::from_white_alpha(8)
     } else {
-        (
-            Color32::from_white_alpha(115),
-            Color32::from_black_alpha(14),
-            Color32::from_white_alpha(235),
-        )
+        Color32::from_black_alpha(11)
     };
-    let mut shapes = vec![
+    (fill, hairline(look))
+}
+
+/// A group or card inside a surface: a flat fill with a hairline border, painted so it stays
+/// put while its list scrolls.
+pub fn card_shapes(rect: Rect, radius: f32, look: &Look) -> Vec<Shape> {
+    let (fill, rim) = group_colors(look);
+    vec![
         Shape::rect_filled(rect, radius, fill),
         Shape::rect_stroke(rect, radius, Stroke::new(1.0, rim), StrokeKind::Inside),
-    ];
-    if rect.width() > radius * 2.0 + 2.0 && top.a() > 0 {
-        shapes.push(Shape::hline(
-            (rect.left() + radius)..=(rect.right() - radius),
-            rect.top() + 1.0,
-            Stroke::new(1.0, top),
-        ));
-    }
-    shapes
+    ]
 }
 
 /// An `egui::Frame` that looks like [`card_shapes`], for code that lays out with frames.
 pub fn card_frame(ctx: &Context, radius: u8) -> egui::Frame {
-    let look = look(ctx);
-    let (fill, rim) = if look.reduce_transparency {
-        if look.dark {
-            (
-                look.base.lerp_to_gamma(Color32::WHITE, 0.10),
-                Color32::from_gray(70),
-            )
-        } else {
-            (Color32::WHITE, Color32::from_gray(210))
-        }
-    } else if look.dark {
-        (Color32::from_white_alpha(9), Color32::from_white_alpha(20))
-    } else {
-        (
-            Color32::from_white_alpha(115),
-            Color32::from_black_alpha(14),
-        )
-    };
+    let (fill, rim) = group_colors(&look(ctx));
     egui::Frame::new()
         .fill(fill)
         .stroke(Stroke::new(1.0, rim))
@@ -555,8 +538,8 @@ pub fn well_fill(look: &Look) -> Color32 {
     match (look.dark, look.reduce_transparency) {
         (true, false) => Color32::from_black_alpha(64),
         (true, true) => look.base.lerp_to_gamma(Color32::BLACK, 0.3),
-        (false, false) => Color32::from_white_alpha(190),
-        (false, true) => Color32::WHITE,
+        (false, false) => Color32::from_black_alpha(15),
+        (false, true) => Color32::from_rgb(0xee, 0xed, 0xea),
     }
 }
 
@@ -899,7 +882,7 @@ impl Gpu {
             merge: false,
             ..GlassLayers::default()
         };
-        // 2. Panes over the field.
+        // 2. Flat surfaces over the field.
         renderer.render(
             &rs.queue,
             &mut encoder,
@@ -911,10 +894,7 @@ impl Gpu {
                 backdrop_scale: field_size[0] as f32 / screen.width(),
                 scroll: 0.0,
                 shapes: &f.panes,
-                params: params(GlassLayers {
-                    shadow: true,
-                    ..quiet
-                }),
+                params: flat_params(),
             },
         );
         renderer.regenerate_mips(&mut encoder, &panes.backdrop);
@@ -1080,8 +1060,8 @@ mod tests {
             pane(
                 ui,
                 Rect::from_min_size(pos2(8.0, 8.0), vec2(200.0, 400.0)),
-                14.0,
-                Tier::Panel,
+                0.0,
+                Tier::Surface(Color32::from_rgb(29, 29, 32)),
             );
         });
         assert!(with_frame(&ctx, |f| f.panes.is_empty()));
@@ -1093,8 +1073,8 @@ mod tests {
             pane(
                 ui,
                 Rect::from_min_size(pos2(8.0, 8.0), vec2(200.0, 400.0)),
-                14.0,
-                Tier::Panel,
+                0.0,
+                Tier::Surface(Color32::from_rgb(29, 29, 32)),
             );
             control(
                 ui,
@@ -1135,7 +1115,7 @@ mod tests {
             reduce_transparency: true,
             ..Look::default()
         };
-        for tier in [Tier::Chrome, Tier::Panel, Tier::Overlay, Tier::Dense] {
+        for tier in [Tier::Surface(Color32::from_rgb(20, 20, 22)), Tier::Overlay] {
             assert_eq!(tier_fill(tier, &look).a(), 255, "{tier:?}");
         }
     }
@@ -1143,20 +1123,48 @@ mod tests {
     #[test]
     fn the_level_slider_thickens_painted_glass() {
         let clear = tier_fill(
-            Tier::Panel,
+            Tier::Overlay,
             &Look {
                 level: 0.0,
                 ..Look::default()
             },
         );
         let tinted = tier_fill(
-            Tier::Panel,
+            Tier::Overlay,
             &Look {
                 level: 1.0,
                 ..Look::default()
             },
         );
         assert!(tinted.a() > clear.a());
+    }
+
+    #[test]
+    fn surfaces_are_one_flat_color_in_both_paths() {
+        let side = Color32::from_rgb(29, 29, 32);
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(216.0, 600.0));
+        // Painted: a single fill, no rim, highlight or shadow.
+        let shapes = fallback(rect, 0.0, Tier::Surface(side), &Look::default());
+        assert_eq!(shapes.len(), 1);
+        match &shapes[0] {
+            Shape::Rect(r) => assert_eq!(r.fill, side),
+            other => panic!("expected a filled rect, got {other:?}"),
+        }
+        // On the GPU: fully tinted with the color, drawn by a pass with every glass layer
+        // off and a tint that is the color itself.
+        let shape = to_shape(rect, 0.0, Tier::Surface(side), &Look::default(), 0);
+        assert_eq!(shape.tint[3], 1.0);
+        let p = flat_params();
+        assert_eq!(
+            (p.lensing, p.rim, p.fringe, p.shadow, p.merge_k),
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        );
+        assert_eq!(
+            (p.outline, p.outline_ends, p.highlight),
+            ([0.0; 2], [0.0; 2], [0.0; 2])
+        );
+        let t = p.tint.expect("surfaces need tint")[0];
+        assert_eq!((t.amount, t.offset, t.gain, t.curve), (1.0, 0.0, 0.0, 0.0));
     }
 
     #[test]

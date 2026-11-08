@@ -338,25 +338,6 @@ struct Chrome {
     enabled: bool,
 }
 
-fn rounded_outline(rect: Rect, radius: f32) -> Vec<egui::Pos2> {
-    let mut points = Vec::with_capacity(44);
-    let corners = [
-        (rect.right_top() + vec2(-radius, radius), -90.0_f32),
-        (rect.right_bottom() + vec2(-radius, -radius), 0.0),
-        (rect.left_bottom() + vec2(radius, -radius), 90.0),
-        (rect.left_top() + vec2(radius, radius), 180.0),
-    ];
-    points.push(rect.left_top() + vec2(radius, 0.0));
-    for (center, start) in corners {
-        for step in 0..=8 {
-            let angle = (start + step as f32 * 11.25).to_radians();
-            points.push(center + radius * vec2(angle.cos(), angle.sin()));
-        }
-    }
-    points.push(rect.left_top() + vec2(radius, 0.0));
-    points
-}
-
 fn paint_chrome(ui: &Ui, id: Id, rect: Rect, c: Chrome, pal: Palette) {
     let ctx = ui.ctx();
     let heat = motion::ease(ctx, id.with("heat"), c.focused, motion::HEAT);
@@ -369,14 +350,12 @@ fn paint_chrome(ui: &Ui, id: Id, rect: Rect, c: Chrome, pal: Palette) {
     } else {
         well.gamma_multiply(0.6)
     };
-    let rest = if c.error {
+    // No outline at rest: the well alone marks a place to type. Focus and errors draw one.
+    let border = if c.error {
         pal.danger
-    } else if c.enabled {
-        pal.control_border.gamma_multiply(0.75)
     } else {
-        pal.border
+        hot.gamma_multiply(heat)
     };
-    let border = lerp(rest, hot, heat);
     let radius = tokens::RADIUS_INPUT;
     let p = ui.painter();
     if heat > 0.0 {
@@ -396,14 +375,7 @@ fn paint_chrome(ui: &Ui, id: Id, rect: Rect, c: Chrome, pal: Palette) {
     if !c.inherited {
         p.add(glass::well_shadow(rect, radius as f32, &look));
     }
-    if c.inherited && heat <= 0.0 && !c.error {
-        p.add(Shape::dashed_line(
-            &rounded_outline(rect.shrink(0.5), radius as f32),
-            Stroke::new(1.0, border),
-            4.0,
-            3.0,
-        ));
-    } else {
+    if border.a() > 0 {
         p.rect_stroke(rect, radius, Stroke::new(1.0, border), StrokeKind::Inside);
     }
     if heat > 0.0 {
@@ -710,22 +682,18 @@ pub fn text_area(
         let enabled = ui.is_enabled();
         // The box is known only after its text is laid out, so paint behind it afterwards.
         let heat = motion::ease(ui.ctx(), id.with("heat"), inner.has_focus(), motion::HEAT);
-        let hot = lerp(
-            if enabled {
-                pal.control_border
-            } else {
-                pal.border
-            },
-            pal.accent,
-            heat,
-        );
+        let well = glass::well_fill(&glass::look(ui.ctx()));
         ui.painter().set(
             layer,
             Shape::Rect(egui::epaint::RectShape::new(
                 rect,
                 tokens::RADIUS,
-                pal.card,
-                Stroke::new(1.0, hot),
+                if enabled {
+                    well
+                } else {
+                    well.gamma_multiply(0.6)
+                },
+                Stroke::new(1.0, pal.accent.gamma_multiply(heat)),
                 StrokeKind::Inside,
             )),
         );
@@ -1350,6 +1318,15 @@ pub fn select(
     resp
 }
 
+/// egui's menus squeeze their buttons to 2 pt of side padding, so a hover fill hugs the text.
+/// Call first inside a menu or context menu to give its rows room.
+pub fn menu_padding(ui: &mut Ui) {
+    let s = ui.spacing_mut();
+    s.button_padding = vec2(10.0, 4.0);
+    s.interact_size.y = 30.0;
+    s.item_spacing.y = 2.0;
+}
+
 /// One row in a [`select`] popup.
 pub fn option(ui: &mut Ui, selected: bool, text: &str) -> Response {
     let pal = current(ui.ctx());
@@ -1668,8 +1645,8 @@ pub fn tag_input(ui: &mut Ui, title: &str, tags: &mut Vec<String>) -> bool {
             Shape::Rect(egui::epaint::RectShape::new(
                 rect,
                 tokens::RADIUS,
-                pal.card,
-                Stroke::new(1.0, lerp(pal.control_border, pal.accent, heat)),
+                glass::well_fill(&glass::look(ui.ctx())),
+                Stroke::new(1.0, pal.accent.gamma_multiply(heat)),
                 StrokeKind::Inside,
             )),
         );
@@ -1728,12 +1705,8 @@ pub fn command_line(ui: &mut Ui, command: &str) -> bool {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, 44.0), Sense::hover());
     let look = glass::look(ui.ctx());
-    ui.painter().extend(glass::fallback(
-        rect,
-        tokens::RADIUS_LARGE as f32,
-        glass::Tier::Dense,
-        &look,
-    ));
+    ui.painter()
+        .rect_filled(rect, tokens::RADIUS_LARGE, glass::well_fill(&look));
     ui.painter().text(
         rect.left_center() + vec2(14.0, 0.0),
         Align2::LEFT_CENTER,

@@ -67,18 +67,9 @@ impl App {
         let (left_id, right_id) = (tab.left.id, tab.right.id);
 
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .outer_margin(egui::Margin::same(8))
-                    .inner_margin(egui::Margin::same(16)),
-            )
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 20)))
             .show(ui, |ui| {
-                super::glass::pane_behind(
-                    ui,
-                    egui::Margin::same(16),
-                    crate::themes::tokens::RADIUS_PANE as f32,
-                    super::glass::Tier::Panel,
-                );
+                super::glass::surface_behind(ui, egui::Margin::symmetric(24, 20), pal.bg, None);
                 ui.label(
                     RichText::new("File transfer")
                         .size(crate::themes::tokens::TITLE)
@@ -137,17 +128,19 @@ impl App {
                     ui.data_mut(|d| d.insert_temp(key, right_visible));
                 }
                 let full = ui.available_rect_before_wrap();
+                // The two locations sit side by side with a gutter between them.
+                const GAP: f32 = 12.0;
                 let width = if narrow {
                     full.width()
                 } else {
-                    full.width() / 2.0
+                    (full.width() - GAP) / 2.0
                 };
                 let left_rect = Rect::from_min_size(full.min, Vec2::new(width, full.height()));
                 let right_rect = if narrow {
                     left_rect
                 } else {
                     Rect::from_min_size(
-                        Pos2::new(full.left() + width, full.top()),
+                        Pos2::new(full.left() + width + GAP, full.top()),
                         Vec2::new(width, full.height()),
                     )
                 };
@@ -398,22 +391,13 @@ impl App {
             .resizable(true)
             .default_size((ui.ctx().content_rect().height()*0.28).clamp(90.0,180.0))
             .size_range(90.0..=(ui.ctx().content_rect().height()*0.4).clamp(90.0,420.0))
-            .frame(
-                egui::Frame::new()
-                    .outer_margin(egui::Margin {
-                        left: 8,
-                        right: 8,
-                        top: 0,
-                        bottom: 8,
-                    })
-                    .inner_margin(egui::Margin::symmetric(14, 8)),
-            )
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 8)))
             .show(ui, |ui| {
-                super::glass::pane_behind(
+                super::glass::surface_behind(
                     ui,
                     egui::Margin::symmetric(14, 8),
-                    crate::themes::tokens::RADIUS_PANE as f32,
-                    super::glass::Tier::Panel,
+                    pal.panel,
+                    Some(super::glass::Edge::Top),
                 );
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Transfer queue").family(crate::fonts::semibold()));
@@ -565,6 +549,7 @@ fn fs_pane(
                         RichText::new(format!("{label}  \u{E136}"))
                             .family(crate::fonts::semibold()),
                         |ui| {
+                            crate::ui::forms::menu_padding(ui);
                             ui.set_min_width(240.0);
                             if ui
                                 .add(forms::Btn::secondary(format!(
@@ -724,6 +709,7 @@ fn fs_pane(
                         });
                     }
                     ui.menu_button("+ New", |ui| {
+                        crate::ui::forms::menu_padding(ui);
                         if ui.button("\u{E25A}  Folder").clicked() {
                             p.new_folder = Some(String::new());
                             ui.close();
@@ -786,8 +772,12 @@ fn fs_pane(
                         .color(pal.text_dim),
                     );
                 }
+                // Leave room for the item count below, so the card ends at the page margin.
+                let footer =
+                    ui.text_style_height(&egui::TextStyle::Small) + ui.spacing().item_spacing.y;
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
+                    .max_height((ui.available_height() - footer).max(ROW_H))
                     .id_salt(("fs-list", id))
                     .show_rows(ui, ROW_H, entries.len(), |ui, range| {
                         for e in &entries[range] {
@@ -813,6 +803,7 @@ fn fs_pane(
                                 }
                             }
                             resp.context_menu(|ui| {
+                                crate::ui::forms::menu_padding(ui);
                                 if !p.selected.contains(&e.path) {
                                     p.selected.clear();
                                     p.selected.insert(e.path.clone());

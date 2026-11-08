@@ -183,6 +183,7 @@ impl App {
                     action = Some(HostAction::ConnectMany(selected.clone()));
                 }
                 ui.menu_button("Move to group", |ui| {
+                    crate::ui::forms::menu_padding(ui);
                     if ui.button("No group").clicked() {
                         action = Some(HostAction::MoveTo(selected.clone(), None));
                         ui.close();
@@ -434,6 +435,7 @@ impl App {
                 *action = Some(HostAction::MoveTo(ids, Some(group)));
             }
             resp.context_menu(|ui| {
+                crate::ui::forms::menu_padding(ui);
                 ui.label(format!("{} hosts", self.count_in_group(group)));
                 if ui.button("Show only this group").clicked() {
                     *action = Some(HostAction::OpenGroup(Some(group)));
@@ -536,6 +538,7 @@ impl App {
             self.host_probe_label(h).0
         ));
         response.context_menu(|ui| {
+            crate::ui::forms::menu_padding(ui);
             if ui.button("Connect to host").clicked() {
                 *action = Some(HostAction::Connect(h.id));
                 ui.close();
@@ -560,6 +563,7 @@ impl App {
                 ui.close();
             }
             ui.menu_button("Move to group", |ui| {
+                crate::ui::forms::menu_padding(ui);
                 if ui.button("No group").clicked() {
                     *action = Some(HostAction::MoveTo(vec![h.id], None));
                     ui.close();
@@ -623,7 +627,11 @@ impl App {
             let wide = rect.width() > 760.0;
             let p = ui.painter();
             p.rect_filled(rect, 10, super::glass::hover_wash(ui).gamma_multiply(hover));
-            p.rect_filled(rect, 10, pal.accent.gamma_multiply(0.14 * warm));
+            p.rect_filled(
+                rect,
+                10,
+                super::glass::selection_fill(ui).gamma_multiply(warm),
+            );
             if marker > 0.0 {
                 let half = (rect.height() / 2.0 - 10.0) * marker;
                 p.vline(
@@ -1119,6 +1127,7 @@ impl App {
     }
 
     fn host_tools_menu(&mut self, ui: &mut egui::Ui) {
+        crate::ui::forms::menu_padding(ui);
         ui.set_min_width(230.0);
         let before = self.vault.settings.clone();
         ui.checkbox(&mut self.vault.settings.hosts_grid_view, "Grid view");
@@ -1128,6 +1137,7 @@ impl App {
         }
         if !self.vault.all_tags().is_empty() {
             ui.menu_button("Filter by tag", |ui| {
+                crate::ui::forms::menu_padding(ui);
                 if ui
                     .selectable_label(self.tag_filter.is_none(), "Any tag")
                     .clicked()
@@ -1148,6 +1158,7 @@ impl App {
         }
         if !self.vault.groups.is_empty() {
             ui.menu_button("Show one group", |ui| {
+                crate::ui::forms::menu_padding(ui);
                 if ui
                     .selectable_label(self.current_group.is_none(), "All groups")
                     .clicked()
@@ -1198,6 +1209,7 @@ impl App {
             ui.close();
         }
         ui.menu_button("\u{E1AA}  Import from cloud", |ui| {
+            crate::ui::forms::menu_padding(ui);
             for (name, which) in [
                 ("DigitalOcean", 0u8),
                 ("AWS EC2", 1),

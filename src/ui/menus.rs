@@ -121,6 +121,7 @@ impl App {
                         ),
                     ] {
                         ui.menu_button(title, |ui| {
+                            crate::ui::forms::menu_padding(ui);
                             for (label, action) in items {
                                 if ui.button(label).clicked() {
                                     self.menu_action(action, ui.ctx());

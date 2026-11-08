@@ -238,14 +238,14 @@ impl App {
             forms::heading(ui, "Glass", 14.0);
             forms::help(
                 ui,
-                "Clear shows more of what sits behind each pane. Tinted makes panes calmer and easier to read.",
+                "Sets how clear the buttons, tabs, menus and other glass controls are. Tinted is calmer and easier to read.",
                 pal,
             );
             forms::slider(ui, &mut s.glass_level, "Glass level", "Clear", "Tinted");
             forms::switch_row(
                 ui,
                 "Reduce transparency",
-                "Draws every pane solid. Your system setting is also respected.",
+                "Draws glass controls, menus and dialogs solid. Your system setting is also respected.",
                 &mut s.reduce_transparency,
             );
             forms::switch_row(
