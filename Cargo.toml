@@ -1,6 +1,6 @@
 [package]
 name = "ferrum-ssh"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 description = "Ferrum — a fast, cross-platform SSH / SFTP / Telnet / Serial / Mosh client written in Rust"
 license = "MIT"
@@ -61,7 +61,7 @@ winresource = "0.1"
 window-vibrancy = "0.8.1"
 muda = { version = "0.20", default-features = false }
 raw-window-handle = "0.6"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSView"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSView", "NSWorkspace", "NSAccessibility"] }
 security-framework = "3"
 objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "LAContext", "LAError", "block2"] }
 block2 = "0.6"

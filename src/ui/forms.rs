@@ -338,25 +338,6 @@ struct Chrome {
     enabled: bool,
 }
 
-fn rounded_outline(rect: Rect, radius: f32) -> Vec<egui::Pos2> {
-    let mut points = Vec::with_capacity(44);
-    let corners = [
-        (rect.right_top() + vec2(-radius, radius), -90.0_f32),
-        (rect.right_bottom() + vec2(-radius, -radius), 0.0),
-        (rect.left_bottom() + vec2(radius, -radius), 90.0),
-        (rect.left_top() + vec2(radius, radius), 180.0),
-    ];
-    points.push(rect.left_top() + vec2(radius, 0.0));
-    for (center, start) in corners {
-        for step in 0..=8 {
-            let angle = (start + step as f32 * 11.25).to_radians();
-            points.push(center + radius * vec2(angle.cos(), angle.sin()));
-        }
-    }
-    points.push(rect.left_top() + vec2(radius, 0.0));
-    points
-}
-
 fn paint_chrome(ui: &Ui, id: Id, rect: Rect, c: Chrome, pal: Palette) {
     let ctx = ui.ctx();
     let heat = motion::ease(ctx, id.with("heat"), c.focused, motion::HEAT);
@@ -369,14 +350,12 @@ fn paint_chrome(ui: &Ui, id: Id, rect: Rect, c: Chrome, pal: Palette) {
     } else {
         well.gamma_multiply(0.6)
     };
-    let rest = if c.error {
+    // No outline at rest: the well alone marks a place to type. Focus and errors draw one.
+    let border = if c.error {
         pal.danger
-    } else if c.enabled {
-        pal.control_border.gamma_multiply(0.75)
     } else {
-        pal.border
+        hot.gamma_multiply(heat)
     };
-    let border = lerp(rest, hot, heat);
     let radius = tokens::RADIUS_INPUT;
     let p = ui.painter();
     if heat > 0.0 {
@@ -396,14 +375,7 @@ fn paint_chrome(ui: &Ui, id: Id, rect: Rect, c: Chrome, pal: Palette) {
     if !c.inherited {
         p.add(glass::well_shadow(rect, radius as f32, &look));
     }
-    if c.inherited && heat <= 0.0 && !c.error {
-        p.add(Shape::dashed_line(
-            &rounded_outline(rect.shrink(0.5), radius as f32),
-            Stroke::new(1.0, border),
-            4.0,
-            3.0,
-        ));
-    } else {
+    if border.a() > 0 {
         p.rect_stroke(rect, radius, Stroke::new(1.0, border), StrokeKind::Inside);
     }
     if heat > 0.0 {
@@ -710,22 +682,18 @@ pub fn text_area(
         let enabled = ui.is_enabled();
         // The box is known only after its text is laid out, so paint behind it afterwards.
         let heat = motion::ease(ui.ctx(), id.with("heat"), inner.has_focus(), motion::HEAT);
-        let hot = lerp(
-            if enabled {
-                pal.control_border
-            } else {
-                pal.border
-            },
-            pal.accent,
-            heat,
-        );
+        let well = glass::well_fill(&glass::look(ui.ctx()));
         ui.painter().set(
             layer,
             Shape::Rect(egui::epaint::RectShape::new(
                 rect,
                 tokens::RADIUS,
-                pal.card,
-                Stroke::new(1.0, hot),
+                if enabled {
+                    well
+                } else {
+                    well.gamma_multiply(0.6)
+                },
+                Stroke::new(1.0, pal.accent.gamma_multiply(heat)),
                 StrokeKind::Inside,
             )),
         );
@@ -876,7 +844,18 @@ pub fn segmented<T: PartialEq + Clone>(
     value: &mut T,
     options: &[(T, &str)],
 ) -> bool {
-    segmented_sized(ui, salt, value, options, 28.0, 13.0, 14.0)
+    segmented_sized(ui, salt, value, options, 28.0, 13.0, 14.0, false)
+}
+
+/// [`segmented`] for switching views, such as detail tabs. Screen readers hear tabs in a
+/// tab list instead of a group of radio buttons.
+pub fn segmented_tabs<T: PartialEq + Clone>(
+    ui: &mut Ui,
+    salt: &str,
+    value: &mut T,
+    options: &[(T, &str)],
+) -> bool {
+    segmented_sized(ui, salt, value, options, 28.0, 13.0, 14.0, true)
 }
 
 pub fn segmented_tiny<T: PartialEq + Clone>(
@@ -885,9 +864,10 @@ pub fn segmented_tiny<T: PartialEq + Clone>(
     value: &mut T,
     options: &[(T, &str)],
 ) -> bool {
-    segmented_sized(ui, salt, value, options, 20.0, 12.0, 10.0)
+    segmented_sized(ui, salt, value, options, 20.0, 12.0, 10.0, false)
 }
 
+#[allow(clippy::too_many_arguments)] // private; the public wrappers fix the sizes
 fn segmented_sized<T: PartialEq + Clone>(
     ui: &mut Ui,
     salt: &str,
@@ -896,6 +876,7 @@ fn segmented_sized<T: PartialEq + Clone>(
     height: f32,
     text_size: f32,
     pad: f32,
+    tabs: bool,
 ) -> bool {
     let pal = current(ui.ctx());
     let id = ui.scope_id().with(("forge-seg", salt));
@@ -930,6 +911,18 @@ fn segmented_sized<T: PartialEq + Clone>(
         vec2(cell, height),
     );
     glass::lens(ui, id.with("lens"), thumb, height / 2.0);
+    // The segments sit in one group node, so a screen reader says "2 of 3".
+    let (group_role, segment_role) = if tabs {
+        (egui::Role::TabList, egui::Role::Tab)
+    } else {
+        (egui::Role::RadioGroup, egui::Role::RadioButton)
+    };
+    let ui = &mut ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("forge-seg-group", salt))
+            .max_rect(rect)
+            .accessibility_role(group_role),
+    );
     let mut changed = false;
     for (i, (option, text)) in options.iter().enumerate() {
         let cell_rect = Rect::from_min_size(
@@ -938,9 +931,7 @@ fn segmented_sized<T: PartialEq + Clone>(
         );
         let resp = ui.interact(cell_rect, id.with(i), Sense::click());
         let selected = option == value;
-        resp.widget_info(|| {
-            WidgetInfo::selected(egui::Role::RadioButton, ui.is_enabled(), selected, *text)
-        });
+        resp.widget_info(|| WidgetInfo::selected(segment_role, ui.is_enabled(), selected, *text));
         let warm = motion::ease(
             ui.ctx(),
             id.with((i, "ink")),
@@ -973,7 +964,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool, name: &str) -> Response {
         *on = !*on;
         resp.mark_changed();
     }
-    resp.widget_info(|| WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *on, name));
+    resp.widget_info(|| WidgetInfo::selected(egui::Role::Switch, ui.is_enabled(), *on, name));
     let ctx = ui.ctx().clone();
     let t = motion::ease(&ctx, resp.id.with("t"), *on, motion::CONTROL);
     let (x, v) = motion::spring_with_velocity(
@@ -1035,7 +1026,7 @@ pub fn switch(ui: &mut Ui, on: &mut bool, name: &str) -> Response {
 }
 
 /// A 0..1 slider with words at both ends. The knob is a drop of glass: it swells while
-/// held and lands on a liquid spring. Arrow keys move it in steps of 0.05.
+/// held and lands on a liquid spring. Arrow keys and screen readers move it in steps of 0.05.
 pub fn slider(ui: &mut Ui, value: &mut f32, name: &str, low: &str, high: &str) -> Response {
     let pal = current(ui.ctx());
     let ctx = ui.ctx().clone();
@@ -1059,6 +1050,26 @@ pub fn slider(ui: &mut Ui, value: &mut f32, name: &str, low: &str, high: &str) -
             *value = ((*value + step * 0.05) * 20.0).round().clamp(0.0, 20.0) / 20.0;
         }
     }
+    // Screen readers can step the value or set it outright, like the arrow keys and pointer.
+    let (steps, set) = ui.input(|i| {
+        use egui::accesskit::{Action, ActionData};
+        let steps = i.num_accesskit_action_requests(resp.id, Action::Increment) as f32
+            - i.num_accesskit_action_requests(resp.id, Action::Decrement) as f32;
+        let set = i
+            .accesskit_action_requests(resp.id, Action::SetValue)
+            .filter_map(|r| match r.data {
+                Some(ActionData::NumericValue(v)) => Some(v as f32),
+                _ => None,
+            })
+            .last();
+        (steps, set)
+    });
+    if let Some(v) = set {
+        *value = v.clamp(0.0, 1.0);
+    }
+    if steps != 0.0 {
+        *value = ((*value + steps * 0.05) * 20.0).round().clamp(0.0, 20.0) / 20.0;
+    }
     if *value != before {
         resp.mark_changed();
     }
@@ -1067,6 +1078,19 @@ pub fn slider(ui: &mut Ui, value: &mut f32, name: &str, low: &str, high: &str) -
         let mut info = WidgetInfo::labeled(egui::Role::Slider, ui.is_enabled(), name);
         info.value = Some(f64::from(shown));
         info
+    });
+    ui.ctx().accesskit_node_builder(resp.id, |node| {
+        use egui::accesskit::Action;
+        node.set_min_numeric_value(0.0);
+        node.set_max_numeric_value(1.0);
+        node.set_numeric_value_step(0.05);
+        node.add_action(Action::SetValue);
+        if shown < 1.0 {
+            node.add_action(Action::Increment);
+        }
+        if shown > 0.0 {
+            node.add_action(Action::Decrement);
+        }
     });
     let look = glass::look(&ctx);
     let p = ui.painter();
@@ -1292,6 +1316,15 @@ pub fn select(
             });
         });
     resp
+}
+
+/// egui's menus squeeze their buttons to 2 pt of side padding, so a hover fill hugs the text.
+/// Call first inside a menu or context menu to give its rows room.
+pub fn menu_padding(ui: &mut Ui) {
+    let s = ui.spacing_mut();
+    s.button_padding = vec2(10.0, 4.0);
+    s.interact_size.y = 30.0;
+    s.item_spacing.y = 2.0;
 }
 
 /// One row in a [`select`] popup.
@@ -1612,8 +1645,8 @@ pub fn tag_input(ui: &mut Ui, title: &str, tags: &mut Vec<String>) -> bool {
             Shape::Rect(egui::epaint::RectShape::new(
                 rect,
                 tokens::RADIUS,
-                pal.card,
-                Stroke::new(1.0, lerp(pal.control_border, pal.accent, heat)),
+                glass::well_fill(&glass::look(ui.ctx())),
+                Stroke::new(1.0, pal.accent.gamma_multiply(heat)),
                 StrokeKind::Inside,
             )),
         );
@@ -1672,12 +1705,8 @@ pub fn command_line(ui: &mut Ui, command: &str) -> bool {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, 44.0), Sense::hover());
     let look = glass::look(ui.ctx());
-    ui.painter().extend(glass::fallback(
-        rect,
-        tokens::RADIUS_LARGE as f32,
-        glass::Tier::Dense,
-        &look,
-    ));
+    ui.painter()
+        .rect_filled(rect, tokens::RADIUS_LARGE, glass::well_fill(&look));
     ui.painter().text(
         rect.left_center() + vec2(14.0, 0.0),
         Align2::LEFT_CENTER,
@@ -1788,6 +1817,144 @@ mod tests {
         });
         output.textures_delta.clear();
         assert!(!ran);
+    }
+
+    /// Runs one frame with the accessibility tree on and returns its nodes.
+    fn a11y_frame(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        add: impl FnMut(&mut Ui),
+    ) -> Vec<(egui::accesskit::NodeId, egui::accesskit::Node)> {
+        ctx.enable_accesskit();
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, add);
+        output.textures_delta.clear();
+        output
+            .platform_output
+            .accesskit_update
+            .map(|u| u.nodes)
+            .unwrap_or_default()
+    }
+
+    fn action(
+        id: Id,
+        action: egui::accesskit::Action,
+        data: Option<egui::accesskit::ActionData>,
+    ) -> egui::Event {
+        egui::Event::AccessKitActionRequest(egui::accesskit::ActionRequest {
+            action,
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node: id.accesskit_id(),
+            data,
+        })
+    }
+
+    #[test]
+    fn switch_is_announced_as_a_switch_with_its_state() {
+        use egui::accesskit::{Role, Toggled};
+        let ctx = egui::Context::default();
+        let mut on = true;
+        let nodes = a11y_frame(&ctx, vec![], |ui| {
+            switch(ui, &mut on, "Reduce transparency");
+        });
+        let (_, node) = nodes
+            .iter()
+            .find(|(_, n)| n.label() == Some("Reduce transparency"))
+            .expect("switch node");
+        assert_eq!(node.role(), Role::Switch);
+        assert_eq!(node.toggled(), Some(Toggled::True));
+    }
+
+    #[test]
+    fn segments_sit_in_one_group_as_tabs_or_radio_buttons() {
+        use egui::accesskit::Role;
+        for (tabs, group, segment) in [
+            (true, Role::TabList, Role::Tab),
+            (false, Role::RadioGroup, Role::RadioButton),
+        ] {
+            let ctx = egui::Context::default();
+            let mut value = 1;
+            let options = [(0, "Logs"), (1, "Stats"), (2, "Ports")];
+            let nodes = a11y_frame(&ctx, vec![], |ui| {
+                if tabs {
+                    segmented_tabs(ui, "t", &mut value, &options);
+                } else {
+                    segmented(ui, "t", &mut value, &options);
+                }
+            });
+            let (_, list) = nodes
+                .iter()
+                .find(|(_, n)| n.role() == group)
+                .expect("group node");
+            let children: Vec<_> = list
+                .children()
+                .iter()
+                .filter_map(|c| nodes.iter().find(|(id, _)| id == c))
+                .map(|(_, n)| (n.role(), n.label().map(str::to_owned), n.toggled()))
+                .collect();
+            assert_eq!(children.len(), 3, "{children:?}");
+            assert!(children.iter().all(|(r, _, _)| *r == segment));
+            assert_eq!(
+                children[1],
+                (
+                    segment,
+                    Some("Stats".into()),
+                    Some(egui::accesskit::Toggled::True)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn slider_takes_increment_decrement_and_set_value_from_a_screen_reader() {
+        use egui::accesskit::{Action, ActionData};
+        let ctx = egui::Context::default();
+        let mut value = 0.5;
+        let slider_id = std::cell::Cell::new(Id::NULL);
+        let frame = |events: Vec<egui::Event>, value: &mut f32| {
+            let nodes = a11y_frame(&ctx, events, |ui| {
+                slider_id.set(slider(ui, value, "Glass level", "Clear", "Tinted").id);
+            });
+            nodes
+                .into_iter()
+                .find(|(_, n)| n.label() == Some("Glass level"))
+                .expect("slider node")
+                .1
+        };
+        let node = frame(vec![], &mut value);
+        assert_eq!(node.numeric_value(), Some(0.5));
+        assert!(node.supports_action(Action::Increment));
+        assert!(node.supports_action(Action::SetValue));
+        frame(
+            vec![action(slider_id.get(), Action::Increment, None)],
+            &mut value,
+        );
+        assert!((value - 0.55).abs() < 1e-6, "{value}");
+        frame(
+            vec![
+                action(slider_id.get(), Action::Decrement, None),
+                action(slider_id.get(), Action::Decrement, None),
+            ],
+            &mut value,
+        );
+        assert!((value - 0.45).abs() < 1e-6, "{value}");
+        frame(
+            vec![action(
+                slider_id.get(),
+                Action::SetValue,
+                Some(ActionData::NumericValue(2.0)),
+            )],
+            &mut value,
+        );
+        assert_eq!(value, 1.0, "set values are clamped");
+        let node = frame(vec![], &mut value);
+        assert!(
+            !node.supports_action(Action::Increment),
+            "nothing above the top"
+        );
     }
 
     #[test]

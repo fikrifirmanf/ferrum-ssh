@@ -348,15 +348,8 @@ pub fn show(
     }
 
     let painter = ui.painter_at(full);
-    // The scheme's background over dense glass: a little of the glass shows at the rim,
-    // the text stays on the scheme's color. Solid with Reduce transparency.
-    let look = super::glass::look(ui.ctx());
-    let alpha = if look.reduce_transparency { 1.0 } else { 0.80 };
-    painter.rect_filled(
-        full,
-        crate::themes::tokens::RADIUS_PANE,
-        scheme.bg.gamma_multiply(alpha),
-    );
+    // The terminal is a flat surface in the scheme's own background.
+    painter.rect_filled(full, 0, scheme.bg);
 
     let origin = inner.min;
     let to_cell = |pos: Pos2, display_offset: usize| -> (Point, Side, usize, usize) {
@@ -1004,6 +997,7 @@ pub fn show(
     // ---------------- Context menu ----------------
     if !cfg.right_click_paste || mouse_mode {
         resp.context_menu(|ui| {
+            crate::ui::forms::menu_padding(ui);
             ui.set_min_width(180.0);
             let has_sel = sess.term.lock().term.selection.is_some();
             if ui.add_enabled(has_sel, egui::Button::new("Copy")).clicked() {

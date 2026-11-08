@@ -23,7 +23,7 @@ Captured from the running Workbench UI with demo hosts. No saved connections or 
 
 ## Liquid glass interface
 
-Panes, controls, menus and dialogs are drawn as liquid glass by [embun](https://crates.io/crates/embun) on the GPU, so the look is the same on macOS, Windows and Linux. Choose how clear or tinted the glass is with **Settings → Appearance → Glass level**. **Reduce transparency** makes it solid; on macOS and Windows it also follows the system setting. Selections and switches move on springs, and **Reduce motion** stops that.
+The sidebar, pages, panels and terminal are flat surfaces separated by hairlines. Buttons, switches, the selected tab, menus and dialogs are drawn as liquid glass by [embun](https://crates.io/crates/embun) on the GPU, so the look is the same on macOS, Windows and Linux. Choose how clear or tinted the glass is with **Settings → Appearance → Glass level**. **Reduce transparency** makes it solid; on macOS and Windows it also follows the system setting. Selections and switches move on springs, and **Reduce motion** stops that.
 
 ## Forge interface
 

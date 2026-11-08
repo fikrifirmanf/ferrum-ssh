@@ -1386,10 +1386,6 @@ impl App {
             self.biometric_tried = true;
             self.start_biometric_unlock(ui.ctx());
         }
-        crate::ui::glass::heat(
-            ui.ctx(),
-            ui.ctx().viewport_rect().shrink2(egui::vec2(300.0, 200.0)),
-        );
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -1474,11 +1470,11 @@ impl App {
             .exact_size(crate::themes::tokens::STATUS)
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| {
-                crate::ui::glass::pane_behind(
+                crate::ui::glass::surface_behind(
                     ui,
                     egui::Margin::symmetric(12, 0),
-                    0.0,
-                    crate::ui::glass::Tier::Chrome,
+                    pal.sidebar,
+                    Some(crate::ui::glass::Edge::Top),
                 );
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 16.0;
@@ -1611,13 +1607,19 @@ impl App {
 impl eframe::App for App {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         if let Some(qa) = self.qa.as_mut() {
+            let queued = !qa.keys.is_empty();
             raw.events.append(&mut qa.keys);
             // Steps that check a hover keep the pointer where the step put it.
-            if qa.steps.get(qa.step).map(String::as_str) == Some("railhover") {
-                raw.events
-                    .push(egui::Event::PointerMoved(egui::pos2(32.0, 127.0)));
-            } else {
-                raw.events.push(egui::Event::PointerGone);
+            match qa.steps.get(qa.step).map(String::as_str) {
+                Some("railhover") => raw
+                    .events
+                    .push(egui::Event::PointerMoved(egui::pos2(32.0, 127.0))),
+                // After the step's right-click, which the queued events above carry.
+                Some("hostmenu") if queued => {}
+                Some("hostmenu") => raw
+                    .events
+                    .push(egui::Event::PointerMoved(egui::pos2(470.0, 330.0))),
+                _ => raw.events.push(egui::Event::PointerGone),
             }
         }
         #[cfg(target_os = "macos")]
@@ -1766,9 +1768,10 @@ impl App {
             dark: !light,
             base: pal.bg,
             heat: pal.accent,
-            heat_alpha: if light { 0.25 } else { 0.20 },
+            // The window is flat now: no glow behind it.
+            heat_alpha: 0.0,
             steel: pal.steel,
-            steel_alpha: if light { 0.30 } else { 0.14 },
+            steel_alpha: 0.0,
         }
     }
 }

@@ -334,7 +334,7 @@ impl App {
             .exact_size(tokens::BAR)
             .frame(egui::Frame::new().inner_margin(bar_margin))
             .show(ui, |ui| {
-                glass::pane_behind(ui, bar_margin, 0.0, glass::Tier::Chrome);
+                glass::surface_behind(ui, bar_margin, pal.sidebar, Some(glass::Edge::Bottom));
                 let response = ui.interact(
                     ui.max_rect(),
                     ui.scope_id().with("title-drag"),
@@ -444,6 +444,7 @@ impl App {
                             rename = Some((t.id(), short.clone()));
                         }
                         resp.context_menu(|ui| {
+                            crate::ui::forms::menu_padding(ui);
                             if ui.button("Rename tab").clicked() {
                                 rename = Some((t.id(), short.clone()));
                                 ui.close();
@@ -480,6 +481,7 @@ impl App {
                     .min_size(Vec2::splat(32.0));
                     egui::containers::menu::MenuButton::from_button(new_tab)
                         .ui(ui, |ui| {
+                            crate::ui::forms::menu_padding(ui);
                             ui.set_min_width(240.0);
                             if ui
                                 .button(format!(
@@ -534,6 +536,7 @@ impl App {
                                 ui.menu_button(
                                     format!("{}  Open workspace", crate::icons::SQUARES_FOUR),
                                     |ui| {
+                                        crate::ui::forms::menu_padding(ui);
                                         for (id, name) in ws {
                                             if ui.button(name).clicked() {
                                                 open_ws = Some(id);
@@ -572,10 +575,19 @@ impl App {
         let expanded = ui.data(|data| data.get_temp::<bool>(expand_key).unwrap_or(false));
         // The editor takes the rail too, so a form gets the room while every page stays reachable.
         let editing = self.editor.is_some() && self.active_tab.is_none();
+        // Expanding it while editing lasts until the editor closes; the saved setting stays.
+        let edit_key = egui::Id::unique("editor-navigation-expanded");
+        let edit_expanded =
+            editing && ui.data(|data| data.get_temp::<bool>(edit_key).unwrap_or(false));
+        if !editing {
+            ui.data_mut(|data| data.remove::<bool>(edit_key));
+        }
         let collapsed = if narrow {
             !expanded
+        } else if editing {
+            !edit_expanded
         } else {
-            self.vault.settings.sidebar_collapsed || editing
+            self.vault.settings.sidebar_collapsed
         };
         let open = motion::ease_panel(ui.ctx(), egui::Id::unique("nav-width"), !collapsed);
         let show_labels = open > 0.5;
@@ -583,22 +595,23 @@ impl App {
             .show_separator_line(false)
             .exact_size(tokens::RAIL + (tokens::SIDEBAR - tokens::RAIL) * open)
             .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .outer_margin(egui::Margin {
-                        left: 8,
-                        right: 0,
-                        top: 8,
-                        bottom: 8,
-                    })
-                    .inner_margin(egui::Margin::symmetric(8, 12)),
-            )
+            .frame(egui::Frame::new().inner_margin(egui::Margin {
+                left: 8,
+                right: 8,
+                top: 4,
+                bottom: 10,
+            }))
             .show(ui, |ui| {
-                glass::pane_behind(
+                glass::surface_behind(
                     ui,
-                    egui::Margin::symmetric(8, 12),
-                    tokens::RADIUS_PANE as f32,
-                    glass::Tier::Panel,
+                    egui::Margin {
+                        left: 8,
+                        right: 8,
+                        top: 4,
+                        bottom: 10,
+                    },
+                    pal.sidebar,
+                    Some(glass::Edge::Right),
                 );
                 ui.spacing_mut().item_spacing.y = 2.0;
                 let short_nav = ui.available_height() < 320.0;
@@ -706,6 +719,8 @@ impl App {
                     {
                         if narrow {
                             ui.data_mut(|data| data.insert_temp(expand_key, !expanded));
+                        } else if editing {
+                            ui.data_mut(|data| data.insert_temp(edit_key, !edit_expanded));
                         } else {
                             self.vault.settings.sidebar_collapsed =
                                 !self.vault.settings.sidebar_collapsed;
@@ -762,24 +777,14 @@ impl App {
             .default_size(tokens::INSPECTOR)
             .size_range(288.0..=360.0)
             .resizable(true)
-            .frame(
-                egui::Frame::new()
-                    .outer_margin(egui::Margin {
-                        left: 0,
-                        right: 8,
-                        top: 8,
-                        bottom: 8,
-                    })
-                    .inner_margin(egui::Margin::same(20)),
-            )
+            .frame(egui::Frame::new().inner_margin(egui::Margin::same(20)))
             .show_collapsible(ui, &mut { docked }, |ui| {
-                glass::pane_behind(
+                glass::surface_behind(
                     ui,
                     egui::Margin::same(20),
-                    tokens::RADIUS_PANE as f32,
-                    glass::Tier::Panel,
+                    pal.panel,
+                    Some(glass::Edge::Left),
                 );
-                glass::heat(ui.ctx(), ui.max_rect());
                 self.host_inspector(ui);
             });
         let page_key = (self.page, self.editor.is_some());
@@ -790,26 +795,17 @@ impl App {
             motion::PANEL,
         );
         let page_margin = egui::Margin::symmetric(
-            tokens::PAGE - 8,
+            tokens::PAGE,
             if ui.ctx().content_rect().height() < 640.0 {
                 12
             } else {
-                20
+                22
             },
         );
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .outer_margin(egui::Margin::same(8))
-                    .inner_margin(page_margin),
-            )
+            .frame(egui::Frame::new().inner_margin(page_margin))
             .show(ui, |ui| {
-                glass::pane_behind(
-                    ui,
-                    page_margin,
-                    tokens::RADIUS_PANE as f32,
-                    glass::Tier::Panel,
-                );
+                glass::surface_behind(ui, page_margin, pal.bg, None);
                 ui.set_opacity(enter);
                 ui.add_space((1.0 - enter) * 6.0);
                 if self.editor.is_some() {
@@ -1118,7 +1114,7 @@ impl App {
             .fade_in(false)
             .show(ctx, |ui| {
                 ui.set_opacity(shown);
-                let framed = glass::overlay_frame(
+                glass::overlay_frame(
                     ui,
                     crate::themes::tokens::RADIUS_OVERLAY as f32,
                     egui::Margin::ZERO,
@@ -1230,9 +1226,6 @@ impl App {
                         ui.add_space(6.0);
                     },
                 );
-                if open {
-                    glass::heat(ui.ctx(), framed.response.rect);
-                }
             });
         if open && ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.palette.open = false;
@@ -1365,7 +1358,6 @@ fn tab_chip(
     let face = rect.shrink2(Vec2::new(2.0, 8.0));
     if active {
         glass::lens(ui, egui::Id::unique("session-tab-lens"), face, 9.0);
-        glass::heat(ui.ctx(), face);
     }
     let p = ui.painter();
     p.rect_filled(face, 9, glass::hover_wash(ui).gamma_multiply(hover));
@@ -1438,24 +1430,23 @@ fn nav_item(
         motion::FAST,
     );
     let on = motion::ease(ctx, resp.id.with("on"), active, motion::FAST);
+    // Selection is a flat rounded fill, not glass; it still glides between items.
+    let radius = 8.0;
     if active {
-        glass::lens(
-            ui,
-            egui::Id::unique("navigation-lens"),
-            rect,
-            rect.height() / 2.0,
-        );
+        let at = motion::liquid_rect(ctx, egui::Id::unique("navigation-selection"), rect);
+        ui.painter()
+            .rect_filled(at, radius, glass::selection_fill(ui));
     }
     let p = ui.painter();
     p.rect_filled(
         rect,
-        rect.height() / 2.0,
-        glass::hover_wash(ui).gamma_multiply(hover),
+        radius,
+        glass::selection_fill(ui).gamma_multiply(hover * 0.6),
     );
     if resp.has_focus() {
         p.rect_stroke(
             rect.expand(1.0),
-            rect.height() / 2.0 + 1.0,
+            radius + 1.0,
             Stroke::new(2.0, pal.accent),
             egui::StrokeKind::Outside,
         );

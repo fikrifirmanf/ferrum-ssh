@@ -111,7 +111,7 @@ fn pane_rects(area: Rect, n: usize, layout: SplitLayout) -> Vec<Rect> {
     if n <= 1 {
         return vec![area];
     }
-    let gap = 2.0;
+    let gap = 1.0;
     match layout {
         SplitLayout::Horizontal => {
             let w = (area.width() - gap * (n - 1) as f32) / n as f32;
@@ -177,22 +177,13 @@ impl App {
         egui::Panel::top(egui::Id::unique(("term-toolbar", tab_id)))
             .show_separator_line(false)
             .exact_size(crate::themes::tokens::BAR)
-            .frame(
-                egui::Frame::new()
-                    .outer_margin(egui::Margin {
-                        left: 8,
-                        right: 8,
-                        top: 8,
-                        bottom: 0,
-                    })
-                    .inner_margin(egui::Margin::symmetric(12, 0)),
-            )
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| {
-                super::glass::pane_behind(
+                super::glass::surface_behind(
                     ui,
                     egui::Margin::symmetric(12, 0),
-                    crate::themes::tokens::RADIUS_PANE as f32,
-                    super::glass::Tier::Chrome,
+                    pal.bg,
+                    Some(super::glass::Edge::Bottom),
                 );
                 ui.horizontal_centered(|ui| {
                     if let Some(pane) = tab.panes.get(tab.active) {
@@ -239,6 +230,7 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().interact_size.y = 32.0;
                         ui.menu_button(crate::icons::DOTS_THREE, |ui| {
+                            crate::ui::forms::menu_padding(ui);
                             if ui.button("Increase terminal font").clicked() {
                                 actions.push(TermAction::FontDelta(1.0));
                                 ui.close();
@@ -253,6 +245,7 @@ impl App {
                         ui.menu_button(
                             format!("{}  Split", crate::icons::SQUARE_SPLIT_HORIZONTAL),
                             |ui| {
+                                crate::ui::forms::menu_padding(ui);
                                 if ui.button("Split right").clicked() {
                                     actions.push(TermAction::Split(SplitLayout::Horizontal));
                                     ui.close();
@@ -268,6 +261,7 @@ impl App {
                             },
                         );
                         ui.menu_button(format!("{}  Tools", crate::icons::MONITOR), |ui| {
+                            crate::ui::forms::menu_padding(ui);
                             for (panel, label) in SESSION_TOOLS {
                                 if forms::option(ui, tab.side_panel == Some(panel), label).clicked()
                                 {
@@ -445,22 +439,13 @@ impl App {
                 .default_size(340.0)
                 .size_range(260.0..=440.0)
                 .resizable(true)
-                .frame(
-                    egui::Frame::new()
-                        .outer_margin(egui::Margin {
-                            left: 0,
-                            right: 8,
-                            top: 8,
-                            bottom: 8,
-                        })
-                        .inner_margin(egui::Margin::same(16)),
-                )
+                .frame(egui::Frame::new().inner_margin(egui::Margin::same(16)))
                 .show(ui, |ui| {
-                    super::glass::pane_behind(
+                    super::glass::surface_behind(
                         ui,
                         egui::Margin::same(16),
-                        crate::themes::tokens::RADIUS_PANE as f32,
-                        super::glass::Tier::Panel,
+                        pal.panel,
+                        Some(super::glass::Edge::Left),
                     );
                     ui.set_opacity(enter);
                     ui.horizontal(|ui|{
@@ -608,18 +593,9 @@ impl App {
 
         if tab.containers.manager.open {
             egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::new()
-                        .outer_margin(egui::Margin::same(8))
-                        .inner_margin(egui::Margin::same(16)),
-                )
+                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(24, 20)))
                 .show(ui, |ui| {
-                    super::glass::pane_behind(
-                        ui,
-                        egui::Margin::same(16),
-                        crate::themes::tokens::RADIUS_PANE as f32,
-                        super::glass::Tier::Panel,
-                    );
+                    super::glass::surface_behind(ui, egui::Margin::symmetric(24, 20), pal.bg, None);
                     let source = match tab.panes.get(tab.active) {
                         Some(pane)
                             if pane.session.target.protocol != crate::model::Protocol::Ssh =>
@@ -736,23 +712,13 @@ impl App {
             // ---------- Panes ----------
             let mut close_pane = None;
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().outer_margin(egui::Margin::same(8)))
+                .frame(egui::Frame::NONE)
                 .show(ui, |ui| {
                     let area = ui.available_rect_before_wrap();
                     let rects = pane_rects(area, tab.panes.len(), tab.layout);
-                    for rect in &rects {
-                        // Terminal text sits on the densest glass; the scheme's own
-                        // background is painted over it by the terminal view.
-                        super::glass::pane(
-                            ui,
-                            *rect,
-                            crate::themes::tokens::RADIUS_PANE as f32,
-                            super::glass::Tier::Dense,
-                        );
-                    }
-                    if let Some(rect) = rects.get(tab.active) {
-                        super::glass::heat(ui.ctx(), *rect);
-                    }
+                    // The terminal runs full bleed on a flat surface; the scheme's own
+                    // background is painted over it by the terminal view.
+                    super::glass::pane(ui, area, 0.0, super::glass::Tier::Surface(pal.bg));
                     let multi = tab.panes.len() > 1;
                     let mut broadcast_bytes: Vec<u8> = vec![];
                     let mut direct: Vec<(usize, Vec<u8>)> = vec![];

@@ -686,6 +686,44 @@ impl App {
             }
             // Points at Workspaces in the collapsed rail (see `raw_input_hook`).
             "railhover" => {}
+            // Right-clicks the second host row, then hovers a menu item (see
+            // `raw_input_hook`), to check the menu's padding. Expects the wide window.
+            // Clicks "Expand navigation" while the host editor is open.
+            "editexpand" => {
+                self.active_tab = None;
+                self.page = Page::Hosts;
+                if let Some(h) = self.vault.hosts.first().cloned() {
+                    self.editor = Some(crate::app::Editor::Host(Box::new(h), false));
+                }
+                if let Some(qa) = &mut self.qa {
+                    let at = egui::pos2(28.0, 952.0);
+                    qa.keys.push(egui::Event::PointerMoved(at));
+                    for pressed in [true, false] {
+                        qa.keys.push(egui::Event::PointerButton {
+                            pos: at,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        });
+                    }
+                }
+            }
+            "hostmenu" => {
+                self.active_tab = None;
+                self.page = Page::Hosts;
+                if let Some(qa) = &mut self.qa {
+                    let at = egui::pos2(430.0, 240.0);
+                    qa.keys.push(egui::Event::PointerMoved(at));
+                    for pressed in [true, false] {
+                        qa.keys.push(egui::Event::PointerButton {
+                            pos: at,
+                            button: egui::PointerButton::Secondary,
+                            pressed,
+                            modifiers: Default::default(),
+                        });
+                    }
+                }
+            }
             "connectionscroll" => {
                 if let Some(qa) = &mut self.qa {
                     qa.keys

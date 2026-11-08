@@ -44,6 +44,7 @@ impl App {
             pal,
             |ui| {
                 ui.menu_button("Import \u{E136}", |ui| {
+                    crate::ui::forms::menu_padding(ui);
                     if ui.button("Paste / import key file…").clicked() {
                         self.dialog = Some(Dialog::KeyImport {
                             label: String::new(),
@@ -145,6 +146,7 @@ impl App {
                         open = Some(Editor::Key(k.clone(), false));
                     }
                     resp.context_menu(|ui| {
+                        crate::ui::forms::menu_padding(ui);
                         if ui.button("Copy public key").clicked() {
                             ui.ctx().copy_text(k.public_key.clone());
                             ui.close();
