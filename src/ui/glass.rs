@@ -732,6 +732,8 @@ pub struct Gpu {
     overlay: Option<(wgpu::Texture, wgpu::TextureView, [u32; 2])>,
     textures: Option<Textures>,
     last: Option<RenderKey>,
+    /// Focus on the last frame, to read the system preference again when focus returns.
+    was_focused: Option<bool>,
 }
 
 impl Gpu {
@@ -763,6 +765,16 @@ impl Gpu {
         ];
         let field_size = [logical[0].div_ceil(4).max(1), logical[1].div_ceil(4).max(1)];
         let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+        if focused && self.was_focused == Some(false) {
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let reduce = system_query();
+                if SYSTEM_REDUCED.swap(reduce, std::sync::atomic::Ordering::Relaxed) != reduce {
+                    ctx.request_repaint();
+                }
+            });
+        }
+        self.was_focused = Some(focused);
         let heat_key = [
             f.heat.min.x.round() as i32,
             f.heat.min.y.round() as i32,
@@ -998,7 +1010,9 @@ impl Gpu {
 
 static SYSTEM_REDUCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Reads the operating system's Reduce transparency preference once, away from the UI thread.
+/// Reads the operating system's Reduce transparency preference away from the UI thread.
+/// `Gpu::end_frame` reads it again whenever the window regains focus, so a change made in
+/// System Settings applies without a restart.
 pub fn detect_system_preference() {
     std::thread::spawn(|| {
         SYSTEM_REDUCED.store(system_query(), std::sync::atomic::Ordering::Relaxed);
@@ -1009,12 +1023,11 @@ pub fn system_reduces_transparency() -> bool {
     SYSTEM_REDUCED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Asks AppKit, as embun does. `defaults read` misses the setting when the key was never
+/// written and can lag behind System Settings.
 #[cfg(target_os = "macos")]
 fn system_query() -> bool {
-    std::process::Command::new("defaults")
-        .args(["read", "com.apple.universalaccess", "reduceTransparency"])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+    objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
 }
 
 #[cfg(target_os = "windows")]
@@ -1156,5 +1169,15 @@ mod tests {
             at(25, 12) > at(75, 12) + 20,
             "heat center should be warmer than the far side"
         );
+    }
+
+    /// The AppKit query runs off the main thread, as `detect_system_preference` does.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_transparency_query_runs_off_the_main_thread() {
+        let reduce = std::thread::spawn(system_query)
+            .join()
+            .expect("query thread");
+        eprintln!("system Reduce transparency: {reduce}");
     }
 }

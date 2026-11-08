@@ -406,7 +406,7 @@ fn details(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<Com
     });
     ui.add_space(4.0);
     let mut tab = browser.manager.tab;
-    if forms::segmented(
+    if forms::segmented_tabs(
         ui,
         "container-detail-tab",
         &mut tab,
