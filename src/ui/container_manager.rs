@@ -6,12 +6,28 @@ use egui_extras::{Column, TableBuilder};
 
 use super::{container_view::Source, forms};
 use crate::containers::{
-    Action, Browser, Item, Runtime,
-    manager::{DetailTab, Sample},
+    Action, Browser, Item, Runtime, StateFilter,
+    inventory::{Kind, Request},
+    manager::{DetailTab, Sample, Section},
 };
 use crate::themes::Palette;
 
 pub enum Command {
+    Inventory(Request),
+    UnifiedLogs {
+        revision: u64,
+        sources: Vec<crate::containers::unified_logs::Source>,
+    },
+    EditLogPreset(crate::containers::unified_logs::PresetEdit),
+    ExportLogs(Vec<crate::containers::unified_logs::Row>),
+    BrowseVolume {
+        name: String,
+        directory: Vec<Vec<u8>>,
+        revision: u64,
+    },
+    ExportVolume(String),
+    EditVolume(crate::containers::volume_files::EditRequest),
+    ImportVolume(String),
     Action(Item, Action),
     Terminal(Item),
     OpenPort(
@@ -31,6 +47,7 @@ pub fn show(
     pal: Palette,
     browser: &mut Browser,
     source: Source,
+    log_presets: Option<&[crate::model::LogFilterPreset]>,
 ) -> Option<Command> {
     let host = match source {
         Source::Ssh(host) => host,
@@ -62,6 +79,57 @@ pub fn show(
             browser.manager.open = false;
         }
     });
+    forms::segmented_tabs(
+        ui,
+        "container-manager-sections",
+        &mut browser.manager.section,
+        &[
+            (Section::Containers, "Containers"),
+            (Section::Inventory(Kind::Images), "Images"),
+            (Section::Inventory(Kind::Volumes), "Volumes"),
+            (Section::Inventory(Kind::Builds), "Builds"),
+            (Section::Logs, "Unified logs"),
+        ],
+    );
+    if let Section::Inventory(kind) = browser.manager.section {
+        return super::container_inventory::show(
+            ui,
+            pal,
+            kind,
+            browser.manager.inventory.page(kind),
+            &mut browser.use_sudo,
+        )
+        .map(|action| match action {
+            super::container_inventory::Action::Inventory(request) => Command::Inventory(request),
+            super::container_inventory::Action::BrowseVolume { name, directory, revision } => {
+                Command::BrowseVolume { name, directory, revision }
+            }
+            super::container_inventory::Action::ExportVolume(name) => Command::ExportVolume(name),
+            super::container_inventory::Action::EditVolume(request) => Command::EditVolume(request),
+            super::container_inventory::Action::ImportVolume(name) => Command::ImportVolume(name),
+        });
+    }
+    if browser.manager.section == Section::Logs {
+        return super::container_logs::show(
+            ui,
+            pal,
+            &mut browser.manager.unified_logs,
+            browser.listing.as_ref(),
+            browser.manager.inventory.page(Kind::Builds),
+            log_presets,
+        )
+        .map(|action| match action {
+            super::container_logs::Action::LoadBuilds => {
+                browser.last_poll = f64::NEG_INFINITY;
+                Command::Inventory(Request::List(Kind::Builds))
+            }
+            super::container_logs::Action::Load { revision, sources } => {
+                Command::UnifiedLogs { revision, sources }
+            }
+            super::container_logs::Action::EditPreset(edit) => Command::EditLogPreset(edit),
+            super::container_logs::Action::Export(rows) => Command::ExportLogs(rows),
+        });
+    }
     feedback(ui, pal, browser);
     let compact = ui.available_height() < 430.0;
     if (compact || browser.manager.tab == DetailTab::Ports)
@@ -96,6 +164,17 @@ pub fn show(
             ui.spinner();
         }
     });
+    forms::segmented(
+        ui,
+        "container-state-filter",
+        &mut browser.state_filter,
+        &[
+            (StateFilter::All, "All states"),
+            (StateFilter::Running, "Running"),
+            (StateFilter::Paused, "Paused"),
+            (StateFilter::Stopped, "Stopped"),
+        ],
+    );
     let Some(listing) = &browser.listing else {
         ui.label("Loading Docker, Podman and Kubernetes containers…");
         return None;
@@ -139,9 +218,12 @@ pub fn show(
     if let Some(error) = &browser.manager.stats_error {
         ui.colored_label(pal.warning, format!("Resources unavailable: {error}"));
     }
-    let query = browser.filter.to_lowercase();
+    let query = browser.filter.trim().to_lowercase();
     let mut groups: BTreeMap<String, Vec<Item>> = BTreeMap::new();
     for item in &listing.items {
+        if !browser.state_filter.matches(item) {
+            continue;
+        }
         let project = item
             .project
             .as_deref()
@@ -176,11 +258,19 @@ pub fn show(
     if rows.is_empty() {
         ui.label(if listing.items.is_empty() {
             "No containers found on this server."
-        } else {
+        } else if browser.state_filter == StateFilter::All {
             "No containers match your search."
+        } else {
+            "No containers match these filters."
         });
-        if !browser.filter.is_empty() && ui.add(forms::Btn::ghost("Clear search")).clicked() {
+        let clear_label = if browser.state_filter == StateFilter::All {
+            "Clear search"
+        } else {
+            "Clear filters"
+        };
+        if !listing.items.is_empty() && ui.add(forms::Btn::ghost(clear_label)).clicked() {
             browser.filter.clear();
+            browser.state_filter = StateFilter::All;
         }
     }
     let height = if compact {
@@ -385,22 +475,16 @@ fn details(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<Com
                 .small()
                 .color(pal.text_dim),
         );
-        if item.runtime != Runtime::Kubernetes {
-            let actions: &[Action] = if item.is_running() {
-                &[Action::Stop, Action::Restart]
-            } else {
-                &[Action::Start]
-            };
-            for &action in actions {
-                if ui
-                    .add_enabled(
-                        browser.busy.is_none(),
-                        forms::Btn::secondary(action.label()).small(),
-                    )
-                    .clicked()
-                {
-                    command = Some(Command::Action(item.clone(), action));
-                }
+        ui.label(RichText::new(&item.state).small().color(pal.text_dim));
+        for &action in item.actions() {
+            if ui
+                .add_enabled(
+                    browser.can_act(),
+                    forms::Btn::secondary(action.label()).small(),
+                )
+                .clicked()
+            {
+                command = Some(Command::Action(item.clone(), action));
             }
         }
     });
@@ -890,6 +974,16 @@ mod tests {
         size: Vec2,
         events: Vec<Event>,
     ) -> (egui::FullOutput, Option<Command>) {
+        render_with_presets(ctx, browser, size, events, None)
+    }
+
+    fn render_with_presets(
+        ctx: &egui::Context,
+        browser: &mut Browser,
+        size: Vec2,
+        events: Vec<Event>,
+        presets: Option<&[crate::model::LogFilterPreset]>,
+    ) -> (egui::FullOutput, Option<Command>) {
         let mut command = None;
         let mut output = ctx.run_ui(
             egui::RawInput {
@@ -903,6 +997,7 @@ mod tests {
                     crate::themes::current(ctx),
                     browser,
                     Source::Ssh("test-host"),
+                    presets,
                 );
             },
         );
@@ -915,14 +1010,24 @@ mod tests {
         size: Vec2,
         label: &str,
     ) -> Option<Command> {
-        render(ctx, browser, size, vec![]);
-        let (output, _) = render(ctx, browser, size, vec![]);
+        click_with_presets(ctx, browser, size, label, None)
+    }
+
+    fn click_with_presets(
+        ctx: &egui::Context,
+        browser: &mut Browser,
+        size: Vec2,
+        label: &str,
+        presets: Option<&[crate::model::LogFilterPreset]>,
+    ) -> Option<Command> {
+        render_with_presets(ctx, browser, size, vec![], presets);
+        let (output, _) = render_with_presets(ctx, browser, size, vec![], presets);
         let point = output
             .shapes
             .iter()
             .find_map(|s| text_position(&s.shape, label))
             .unwrap_or_else(|| panic!("Missing visible control: {label}"));
-        render(
+        render_with_presets(
             ctx,
             browser,
             size,
@@ -935,8 +1040,9 @@ mod tests {
                     modifiers: Default::default(),
                 },
             ],
+            presets,
         );
-        render(
+        render_with_presets(
             ctx,
             browser,
             size,
@@ -946,6 +1052,7 @@ mod tests {
                 pressed: false,
                 modifiers: Default::default(),
             }],
+            presets,
         )
         .1
     }
@@ -955,6 +1062,393 @@ mod tests {
             text(&shape.shape, &mut out);
         }
         out
+    }
+
+    #[test]
+    fn volume_tab_filters_rows_and_inspects_on_selection() {
+        use crate::containers::inventory::{Entry, Reply, Volume};
+
+        let mut browser = fixture();
+        let ctx = egui::Context::default();
+        let size = Vec2::new(760.0, 380.0);
+        assert!(matches!(
+            click(&ctx, &mut browser, size, "Volumes"),
+            Some(Command::Inventory(Request::List(Kind::Volumes)))
+        ));
+        let page = browser.manager.inventory.page(Kind::Volumes);
+        let volumes = ["app-data", "build-cache"]
+            .map(|name| {
+                Entry::Volume(Volume {
+                    name: name.into(),
+                    driver: "local".into(),
+                    scope: "local".into(),
+                })
+            })
+            .into();
+        page.apply(Request::List(Kind::Volumes), Ok(Reply::Listing(volumes)));
+
+        click(&ctx, &mut browser, size, "Search volumes");
+        let (output, _) = render(&ctx, &mut browser, size, vec![Event::Text("cache".into())]);
+        assert_eq!(browser.manager.inventory.page(Kind::Volumes).filter, "cache");
+        let text = rendered_text(&output);
+        assert!(text.contains("build-cache"));
+        assert!(!text.lines().any(|line| line == "app-data"));
+        let command = click(&ctx, &mut browser, size, "build-cache");
+        let Some(Command::Inventory(Request::Inspect(Kind::Volumes, volume))) = command else {
+            panic!("Expected volume inspection");
+        };
+        assert_eq!(volume, "build-cache");
+        click(&ctx, &mut browser, size, "All volumes");
+        let page = browser.manager.inventory.page(Kind::Volumes);
+        assert_eq!(page.filter, "cache");
+        assert_eq!(page.selected, None);
+    }
+
+    #[test]
+    fn volume_file_browser_opens_folders_and_exports_the_whole_volume() {
+        use crate::containers::{
+            inventory::{Entry, Reply, Volume},
+            volume_files::{Entry as File, Kind as FileKind},
+        };
+
+        let mut browser = fixture();
+        browser.manager.section = Section::Inventory(Kind::Volumes);
+        let page = browser.manager.inventory.page(Kind::Volumes);
+        page.apply(
+            Request::List(Kind::Volumes),
+            Ok(Reply::Listing(vec![Entry::Volume(Volume {
+                name: "app-data".into(),
+                driver: "local".into(),
+                scope: "local".into(),
+            })])),
+        );
+        let ctx = egui::Context::default();
+        let size = Vec2::new(850.0, 440.0);
+        click(&ctx, &mut browser, size, "app-data");
+        click(&ctx, &mut browser, size, "Browse files");
+        let Some(Command::BrowseVolume { name, directory, revision }) =
+            render(&ctx, &mut browser, size, vec![]).1
+        else {
+            panic!("Expected the volume's root folder");
+        };
+        assert_eq!(name, "app-data");
+        assert!(directory.is_empty());
+        browser.manager.inventory.page(Kind::Volumes).files.apply(
+            revision,
+            Ok(vec![File {
+                name: b"nested".to_vec(),
+                kind: FileKind::Directory,
+            }]),
+        );
+        let Some(Command::BrowseVolume { directory, .. }) =
+            click(&ctx, &mut browser, size, "nested")
+        else {
+            panic!("Expected a request for the selected folder");
+        };
+        assert_eq!(directory, [b"nested".to_vec()]);
+        assert!(matches!(
+            click(&ctx, &mut browser, size, "Export volume"),
+            Some(Command::ExportVolume(name)) if name == "app-data"
+        ));
+    }
+
+    #[test]
+    fn volume_text_editor_opens_and_keeps_the_draft_on_save_conflict() {
+        use crate::containers::{
+            inventory::{Entry, Reply, Volume},
+            volume_files::{Edit, EditResult, Entry as File, Kind as FileKind, version},
+        };
+
+        let mut browser = fixture();
+        browser.manager.section = Section::Inventory(Kind::Volumes);
+        let page = browser.manager.inventory.page(Kind::Volumes);
+        page.apply(
+            Request::List(Kind::Volumes),
+            Ok(Reply::Listing(vec![Entry::Volume(Volume {
+                name: "app-data".into(),
+                driver: "local".into(),
+                scope: "local".into(),
+            })])),
+        );
+        page.select("app-data");
+        page.files.open = true;
+        page.files.apply(page.files.revision, Ok(vec![File {
+            name: b"settings.ini".to_vec(),
+            kind: FileKind::File(8),
+        }]));
+        let ctx = egui::Context::default();
+        let size = Vec2::new(850.0, 440.0);
+        let Some(Command::EditVolume(request)) = click(&ctx, &mut browser, size, "Edit text") else {
+            panic!("Expected a volume text editor request");
+        };
+        assert!(matches!(request.edit, Edit::Open));
+        assert_eq!(request.name, b"settings.ini");
+        let text = "port=80\n";
+        let original = version("20:123:8:time:time:1", text).unwrap();
+        let files = &mut browser.manager.inventory.page(Kind::Volumes).files;
+        files.apply_edit(request.revision, Ok(EditResult::Opened {
+            version: original.clone(),
+            text: text.into(),
+        }));
+        let editor = files.editor.as_mut().unwrap();
+        editor.text = "port=8080\n".into();
+        editor.dirty = true;
+        let Some(Command::EditVolume(request)) = click(&ctx, &mut browser, size, "Save file") else {
+            panic!("Expected a save request");
+        };
+        let Edit::Save { original: expected, text } = request.edit else {
+            panic!("Expected the draft to be uploaded");
+        };
+        assert_eq!(expected, original);
+        assert_eq!(text, "port=8080\n");
+        let files = &mut browser.manager.inventory.page(Kind::Volumes).files;
+        files.apply_edit(request.revision, Err("The file changed on the host.".into()));
+        let (output, _) = render(&ctx, &mut browser, size, vec![]);
+        let rendered = rendered_text(&output);
+        assert!(rendered.contains("The file changed on the host."));
+        assert!(rendered.contains("port=8080"));
+        assert!(rendered.contains("Discard edits"));
+    }
+
+    #[test]
+    fn volume_import_uses_the_new_volume_name_from_the_form() {
+        use crate::containers::inventory::Reply;
+
+        let mut browser = fixture();
+        browser.manager.section = Section::Inventory(Kind::Volumes);
+        browser.manager.inventory.page(Kind::Volumes).apply(
+            Request::List(Kind::Volumes),
+            Ok(Reply::Listing(Vec::new())),
+        );
+        let ctx = egui::Context::default();
+        let size = Vec2::new(850.0, 440.0);
+        click(&ctx, &mut browser, size, "e.g. app-data");
+        render(
+            &ctx,
+            &mut browser,
+            size,
+            vec![Event::Text("restored-data".into())],
+        );
+        assert!(matches!(
+            click(&ctx, &mut browser, size, "Import archive"),
+            Some(Command::ImportVolume(name)) if name == "restored-data"
+        ));
+    }
+
+    #[test]
+    fn builds_tab_opens_the_selected_record_and_filters_its_log() {
+        use crate::containers::inventory::{Detail, Entry, Reply};
+
+        let mut browser = fixture();
+        let ctx = egui::Context::default();
+        let size = Vec2::new(1200.0, 800.0);
+        assert!(matches!(
+            click(&ctx, &mut browser, size, "Builds"),
+            Some(Command::Inventory(Request::List(Kind::Builds)))
+        ));
+
+        let build_ref = "desktop-linux/desktop-linux/build123";
+        let build = serde_json::from_value(serde_json::json!({
+            "ref": build_ref,
+            "name": "web image",
+            "status": "Error",
+            "created_at": "2026-11-18T17:56:33Z",
+            "completed_steps": 2,
+            "total_steps": 3,
+        }))
+        .unwrap();
+        browser.manager.inventory.page(Kind::Builds).apply(
+            Request::List(Kind::Builds),
+            Ok(Reply::Listing(vec![Entry::Build(build)])),
+        );
+        let Some(Command::Inventory(Request::Inspect(Kind::Builds, selected))) =
+            click(&ctx, &mut browser, size, "web image")
+        else {
+            panic!("Expected the selected build's log request");
+        };
+        assert_eq!(selected, build_ref);
+
+        browser.manager.inventory.page(Kind::Builds).apply(
+            Request::Inspect(Kind::Builds, selected),
+            Ok(Reply::Detail(Detail::BuildLog(
+                "loaded build context\nCOPY missing-file failed\n".into(),
+            ))),
+        );
+        click(&ctx, &mut browser, size, "Search build log");
+        let (output, _) = render(
+            &ctx,
+            &mut browser,
+            size,
+            vec![Event::Text("MISSING-FILE".into())],
+        );
+        let text = rendered_text(&output);
+        assert!(text.contains("COPY missing-file failed"));
+        assert!(!text.contains("loaded build context"));
+        assert!(text.contains("2 of 3 steps"));
+    }
+
+    #[test]
+    fn unified_logs_loads_only_selected_sources_and_searches_messages() {
+        use crate::containers::{inventory::Reply, unified_logs::{Row, Snapshot}};
+
+        let mut browser = fixture();
+        browser.manager.inventory.page(Kind::Builds).apply(
+            Request::List(Kind::Builds),
+            Ok(Reply::Listing(Vec::new())),
+        );
+        let ctx = egui::Context::default();
+        let size = Vec2::new(1200.0, 800.0);
+        click(&ctx, &mut browser, size, "Unified logs");
+        click(&ctx, &mut browser, size, "Docker / shop-api");
+        let Some(Command::UnifiedLogs { revision, sources }) =
+            click(&ctx, &mut browser, size, "Refresh logs")
+        else {
+            panic!("Expected logs for the selected workload");
+        };
+        assert_eq!(sources.iter().map(|source| source.key()).collect::<Vec<_>>(), ["Docker/abcdef123456/shop-api"]);
+        browser.manager.unified_logs.apply(revision, Snapshot {
+            rows: ["ready for requests", "disk quota exceeded"]
+                .map(|message| Row {
+                    time: None,
+                    source: "Docker / shop-api".into(),
+                    message: message.into(),
+                })
+                .into(),
+            errors: Vec::new(),
+        });
+        click(&ctx, &mut browser, size, "Search logs");
+        let (output, _) = render(&ctx, &mut browser, size, vec![Event::Text("QUOTA".into())]);
+        let text = rendered_text(&output);
+        assert!(text.contains("disk quota exceeded"));
+        assert!(!text.contains("ready for requests"));
+
+        click(&ctx, &mut browser, size, "Search options");
+        click(&ctx, &mut browser, size, "Regular expression");
+        assert!(browser.manager.unified_logs.search.regex);
+        click(&ctx, &mut browser, size, "Search options");
+        click(&ctx, &mut browser, size, "Export logs");
+        let Some(Command::ExportLogs(exported)) =
+            click(&ctx, &mut browser, size, "Export matches")
+        else {
+            panic!("Expected an export for matching rows");
+        };
+        assert_eq!(
+            exported
+                .iter()
+                .map(|row| row.message.as_str())
+                .collect::<Vec<_>>(),
+            ["disk quota exceeded"]
+        );
+
+        assert!(matches!(
+            click(&ctx, &mut browser, size, "Auto-refresh"),
+            Some(Command::UnifiedLogs { .. })
+        ));
+        let now = ctx.input(|input| input.time);
+        browser.manager.unified_logs.last_request = Some(now);
+        assert!(render(&ctx, &mut browser, size, vec![]).1.is_none());
+        let mut next = None;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                time: Some(now + 5.1),
+                ..Default::default()
+            },
+            |ui| {
+                next = show(
+                    ui,
+                    crate::themes::current(&ctx),
+                    &mut browser,
+                    Source::Ssh("test-host"),
+                    None,
+                );
+            },
+        );
+        assert!(matches!(next, Some(Command::UnifiedLogs { .. })));
+    }
+
+    #[test]
+    fn selecting_a_saved_log_filter_reloads_its_sources() {
+        use crate::containers::inventory::Reply;
+        use crate::model::{LogFilterPreset, LogSearch};
+
+        let mut browser = fixture();
+        browser.manager.section = Section::Logs;
+        browser.manager.inventory.page(Kind::Builds).apply(
+            Request::List(Kind::Builds),
+            Ok(Reply::Listing(Vec::new())),
+        );
+        let preset = LogFilterPreset {
+            name: "Workload errors".into(),
+            search: LogSearch {
+                query: "^ERROR".into(),
+                regex: true,
+                case_sensitive: true,
+            },
+            sources: ["Docker/abcdef123456/shop-api".to_owned()].into(),
+        };
+        let presets = Some(std::slice::from_ref(&preset));
+        let ctx = egui::Context::default();
+        let size = Vec2::new(1200.0, 800.0);
+        click_with_presets(&ctx, &mut browser, size, "Saved filters", presets);
+        let Some(Command::UnifiedLogs { sources, .. }) =
+            click_with_presets(&ctx, &mut browser, size, "Workload errors", presets)
+        else {
+            panic!("Expected the preset to request its saved sources");
+        };
+        assert_eq!(
+            sources.iter().map(|source| source.key()).collect::<Vec<_>>(),
+            ["Docker/abcdef123456/shop-api"],
+        );
+        assert_eq!(browser.manager.unified_logs.search, preset.search);
+    }
+
+    #[test]
+    fn compact_log_source_picker_opens_without_permanently_using_table_space() {
+        let mut browser = fixture();
+        browser.manager.section = Section::Logs;
+        let ctx = egui::Context::default();
+        let size = Vec2::new(760.0, 380.0);
+        let (output, _) = render(&ctx, &mut browser, size, vec![]);
+        assert!(!rendered_text(&output).contains("Find log sources"));
+
+        click(&ctx, &mut browser, size, "Sources (0 selected)");
+        click(&ctx, &mut browser, size, "Docker / shop-api");
+        assert!(
+            browser
+                .manager
+                .unified_logs
+                .selected
+                .contains("Docker/abcdef123456/shop-api")
+        );
+    }
+
+    #[test]
+    fn paused_filter_keeps_only_paused_rows_and_offers_resume() {
+        let mut browser = fixture();
+        browser.listing.as_mut().unwrap().items.extend(
+            crate::containers::parse(
+                r#"@docker
+{"ID":"123456abcdef","Names":"paused-worker","Image":"alpine:3.21","State":"paused","Status":"Up 2 hours (Paused)"}
+"#,
+            )
+            .items,
+        );
+        let ctx = egui::Context::default();
+        let size = Vec2::new(1400.0, 900.0);
+        click(&ctx, &mut browser, size, "Paused");
+        let (output, _) = render(&ctx, &mut browser, size, vec![]);
+        let text = rendered_text(&output);
+        assert!(text.contains("paused-worker"));
+        assert!(!text.contains("shop-api"));
+        assert!(!text.contains("batch-worker"));
+
+        click(&ctx, &mut browser, size, "paused-worker");
+        let command = click(&ctx, &mut browser, size, "Resume");
+        let Some(Command::Action(item, Action::Resume)) = command else {
+            panic!("Expected a resume command");
+        };
+        assert_eq!(item.scope, "123456abcdef");
     }
 
     #[test]

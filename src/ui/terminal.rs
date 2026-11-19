@@ -25,6 +25,54 @@ enum TermAction {
         sudo: bool,
         client: std::sync::Arc<crate::conn::ssh::SshClient>,
     },
+    ContainerInventory {
+        tab: u64,
+        session: u64,
+        sudo: bool,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        request: crate::containers::inventory::Request,
+    },
+    BrowseVolume {
+        tab: u64,
+        session: u64,
+        sudo: bool,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        name: String,
+        directory: Vec<Vec<u8>>,
+        revision: u64,
+    },
+    ExportVolume {
+        sudo: bool,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        name: String,
+    },
+    EditVolume {
+        tab: u64,
+        session: u64,
+        sudo: bool,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        request: crate::containers::volume_files::EditRequest,
+    },
+    ImportVolume {
+        tab: u64,
+        session: u64,
+        sudo: bool,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        name: String,
+    },
+    UnifiedLogs {
+        tab: u64,
+        session: u64,
+        revision: u64,
+        sudo: bool,
+        client: std::sync::Arc<crate::conn::ssh::SshClient>,
+        sources: Vec<crate::containers::unified_logs::Source>,
+    },
+    EditLogPreset {
+        host: uuid::Uuid,
+        edit: crate::containers::unified_logs::PresetEdit,
+    },
+    ExportLogs(Vec<crate::containers::unified_logs::Row>),
     ContainerResources {
         tab: u64,
         session: u64,
@@ -342,6 +390,7 @@ impl App {
                 }
                 let now = ui.input(|i| i.time);
                 if !tab.containers.in_flight
+                    && tab.containers.busy.is_none()
                     && now - tab.containers.last_poll >= CONTAINER_INTERVAL
                     && session.is_live()
                     && session.target.protocol == crate::model::Protocol::Ssh
@@ -359,6 +408,7 @@ impl App {
                     }
                 }
                 if tab.containers.manager.open
+                    && tab.containers.manager.section == crate::containers::manager::Section::Containers
                     && session.is_live()
                     && session.target.protocol == crate::model::Protocol::Ssh
                 {
@@ -610,11 +660,102 @@ impl App {
                         }
                         None => super::container_view::Source::Unsupported,
                     };
-                    let command =
-                        super::container_manager::show(ui, pal, &mut tab.containers, source);
+                    let saved_host = tab.panes.get(tab.active)
+                        .and_then(|pane| pane.session.target.host_id)
+                        .filter(|id| self.vault.host(*id).is_some());
+                    let presets = saved_host.map(|id| {
+                        settings.log_filter_presets.get(&id).map(Vec::as_slice).unwrap_or_default()
+                    });
+                    let command = super::container_manager::show(
+                        ui, pal, &mut tab.containers, source, presets,
+                    );
                     if let (Some(command), Some(pane)) = (command, tab.panes.get(tab.active)) {
                         if let Some(client) = pane.session.ssh.lock().clone() {
                             match command {
+                                super::container_manager::Command::Inventory(request) => {
+                                    let page = tab.containers.manager.inventory.page(request.kind());
+                                    page.pending = true;
+                                    if !matches!(request, crate::containers::inventory::Request::List(_)
+                                        | crate::containers::inventory::Request::Inspect(..))
+                                    {
+                                        page.notice = None;
+                                    }
+                                    actions.push(TermAction::ContainerInventory {
+                                        tab: tab_id,
+                                        session: pane.session.id,
+                                        sudo: tab.containers.use_sudo,
+                                        client,
+                                        request,
+                                    });
+                                }
+                                super::container_manager::Command::BrowseVolume {
+                                    name,
+                                    directory,
+                                    revision,
+                                } => {
+                                    tab.containers.manager.inventory
+                                        .page(crate::containers::inventory::Kind::Volumes)
+                                        .files.pending = true;
+                                    actions.push(TermAction::BrowseVolume {
+                                        tab: tab_id,
+                                        session: pane.session.id,
+                                        sudo: tab.containers.use_sudo,
+                                        client,
+                                        name,
+                                        directory,
+                                        revision,
+                                    });
+                                }
+                                super::container_manager::Command::ExportVolume(name) => {
+                                    actions.push(TermAction::ExportVolume {
+                                        sudo: tab.containers.use_sudo,
+                                        client,
+                                        name,
+                                    });
+                                }
+                                super::container_manager::Command::EditVolume(request) => {
+                                    let files = &mut tab.containers.manager.inventory
+                                        .page(crate::containers::inventory::Kind::Volumes).files;
+                                    if let Some(editor) = &mut files.editor {
+                                        editor.pending = true;
+                                        editor.error = None;
+                                        actions.push(TermAction::EditVolume {
+                                            tab: tab_id, session: pane.session.id,
+                                            sudo: tab.containers.use_sudo, client, request,
+                                        });
+                                    }
+                                }
+                                super::container_manager::Command::ImportVolume(name) => {
+                                    actions.push(TermAction::ImportVolume {
+                                        tab: tab_id,
+                                        session: pane.session.id,
+                                        sudo: tab.containers.use_sudo,
+                                        client,
+                                        name,
+                                    });
+                                }
+                                super::container_manager::Command::UnifiedLogs { revision, sources } => {
+                                    let view = &mut tab.containers.manager.unified_logs;
+                                    view.pending = true;
+                                    view.last_request = Some(ui.input(|input| input.time));
+                                    view.refresh_requested = false;
+                                    actions.push(TermAction::UnifiedLogs {
+                                        tab: tab_id,
+                                        session: pane.session.id,
+                                        revision,
+                                        sudo: tab.containers.use_sudo,
+                                        client,
+                                        sources,
+                                    });
+                                }
+                                super::container_manager::Command::EditLogPreset(edit) => {
+                                    if let Some(host) = saved_host {
+                                        actions.push(TermAction::EditLogPreset { host, edit });
+                                    }
+                                }
+                                super::container_manager::Command::ExportLogs(rows) => {
+                                    actions.push(TermAction::ExportLogs(rows));
+                                }
                                 super::container_manager::Command::Action(item, action) => {
                                     tab.containers.busy =
                                         Some(format!("{} {}…", action.label(), item.name));
@@ -1013,6 +1154,29 @@ impl App {
                 TermAction::Copy(c) => {
                     ui.ctx().copy_text(c);
                 }
+                TermAction::EditLogPreset { host, edit } => {
+                    if crate::containers::unified_logs::edit_presets(&mut self.vault.settings, host, edit) {
+                        crate::store::touch_settings(&mut self.vault);
+                        self.mark_dirty();
+                        ui.ctx().request_repaint();
+                    }
+                }
+                TermAction::ExportLogs(rows) => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Export logs")
+                        .set_file_name("ferrum-logs.jsonl")
+                        .add_filter("JSON Lines", &["jsonl"])
+                        .save_file()
+                    {
+                        let bridge = self.bridge.clone();
+                        self.rt.spawn_blocking(move || {
+                            match crate::containers::unified_logs::export(&path, &rows) {
+                                Ok(()) => bridge.toast(format!("Exported {} log lines.", rows.len()), false),
+                                Err(error) => bridge.toast(format!("Log export failed. {error:#}"), true),
+                            }
+                        });
+                    }
+                }
                 TermAction::OpenUrl(u) => {
                     let _ = open::that_detached(u);
                 }
@@ -1049,6 +1213,108 @@ impl App {
                             tab,
                             session,
                             result,
+                        });
+                    });
+                }
+                TermAction::ContainerInventory {
+                    tab,
+                    session,
+                    sudo,
+                    client,
+                    request,
+                } => {
+                    let bridge = self.bridge.clone();
+                    self.rt.spawn(async move {
+                        let result = crate::containers::inventory::run(&client, &request, sudo)
+                            .await
+                            .map_err(|error| error.to_string());
+                        bridge.send(AppEvent::ContainerInventory {
+                            tab,
+                            session,
+                            request,
+                            result,
+                        });
+                    });
+                }
+                TermAction::BrowseVolume {
+                    tab,
+                    session,
+                    sudo,
+                    client,
+                    name,
+                    directory,
+                    revision,
+                } => {
+                    let bridge = self.bridge.clone();
+                    self.rt.spawn(async move {
+                        let result = crate::containers::volume_files::browse(
+                            &client, &name, &directory, sudo,
+                        ).await.map_err(|error| format!("{error:#}"));
+                        bridge.send(AppEvent::VolumeFiles { tab, session, revision, result });
+                    });
+                }
+                TermAction::ExportVolume { sudo, client, name } => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Export Docker volume")
+                        .set_file_name(format!("{name}.tar"))
+                        .add_filter("Tar archive", &["tar"])
+                        .save_file()
+                    {
+                        self.toast(format!("Exporting {name}…"), false);
+                        let bridge = self.bridge.clone();
+                        self.rt.spawn(async move {
+                            match crate::containers::volume_files::export(&client, &name, &path, sudo).await {
+                                Ok(_) => bridge.toast(format!("Exported {name}."), false),
+                                Err(error) => bridge.toast(format!("Volume export failed. {error:#}"), true),
+                            }
+                        });
+                    }
+                }
+                TermAction::EditVolume { tab, session, sudo, client, request } => {
+                    let revision = request.revision;
+                    let bridge = self.bridge.clone();
+                    self.rt.spawn(async move {
+                        let result = crate::containers::volume_files::edit(&client, request, sudo)
+                            .await.map_err(|error| format!("{error:#}"));
+                        bridge.send(AppEvent::VolumeEdit { tab, session, revision, result });
+                    });
+                }
+                TermAction::ImportVolume { tab, session, sudo, client, name } => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title(format!("Import into new volume {name}"))
+                        .add_filter("Tar archives", &["tar", "gz", "tgz"])
+                        .pick_file()
+                        && let Some(tt) = self.container_tab(tab, session)
+                    {
+                        let page = tt.containers.manager.inventory
+                            .page(crate::containers::inventory::Kind::Volumes);
+                        page.pending = true;
+                        page.notice = Some(Ok(format!("Importing {name}…")));
+                        let bridge = self.bridge.clone();
+                        self.rt.spawn(async move {
+                            let result = crate::containers::volume_import::import(
+                                &client, &name, &path, sudo,
+                            ).await.map_err(|error| format!("{error:#}"));
+                            bridge.send(AppEvent::VolumeImport { tab, session, name, result });
+                        });
+                    }
+                }
+                TermAction::UnifiedLogs {
+                    tab,
+                    session,
+                    revision,
+                    sudo,
+                    client,
+                    sources,
+                } => {
+                    let bridge = self.bridge.clone();
+                    self.rt.spawn(async move {
+                        let snapshot = crate::containers::unified_logs::load(&client, sources, sudo).await;
+                        bridge.send(AppEvent::UnifiedLogs {
+                            tab,
+                            session,
+                            revision,
+                            snapshot,
                         });
                     });
                 }

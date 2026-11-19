@@ -247,10 +247,160 @@ impl SshClient {
         ))
     }
 
+    /// Transfer binary stdout while keeping command diagnostics out of the payload.
+    pub async fn exec_to_writer(
+        &self,
+        cmd: &str,
+        writer: &mut (impl AsyncWrite + Unpin),
+        limit: Option<u64>,
+        idle_timeout: Duration,
+    ) -> Result<(u64, String, u32)> {
+        let mut channel = tokio::time::timeout(idle_timeout, self.handle.channel_open_session())
+            .await
+            .context("The SSH server did not open a command channel")??;
+        let result = async {
+            tokio::time::timeout(idle_timeout, channel.exec(true, cmd))
+                .await
+                .context("The SSH server did not accept the command")??;
+            let mut written = 0u64;
+            let mut diagnostics = Vec::new();
+            let mut status = None;
+            loop {
+                let message = tokio::time::timeout(idle_timeout, channel.wait())
+                    .await
+                    .context("The remote command stopped sending data")?;
+                match message {
+                    Some(ChannelMsg::Data { data }) => {
+                        let next = written
+                            .checked_add(data.len() as u64)
+                            .context("Remote output is too large")?;
+                        if limit.is_some_and(|limit| next > limit) {
+                            bail!("The remote response exceeds the size limit");
+                        }
+                        writer.write_all(&data).await?;
+                        written = next;
+                    }
+                    Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        const DIAGNOSTIC_LIMIT: usize = 16 * 1024;
+                        let keep = data.len().min(DIAGNOSTIC_LIMIT);
+                        let drop = (diagnostics.len() + keep).saturating_sub(DIAGNOSTIC_LIMIT);
+                        diagnostics.drain(..drop);
+                        diagnostics.extend_from_slice(&data[data.len() - keep..]);
+                    }
+                    Some(ChannelMsg::ExitStatus { exit_status }) => status = Some(exit_status),
+                    Some(ChannelMsg::Failure) => bail!("The server refused the command"),
+                    Some(ChannelMsg::Close) | None => break,
+                    _ => {}
+                }
+            }
+            writer.flush().await?;
+            Ok((
+                written,
+                String::from_utf8_lossy(&diagnostics).into_owned(),
+                status.context("The remote command closed without reporting its exit status")?,
+            ))
+        }
+        .await;
+        if result.is_err() {
+            let _ = channel.close().await;
+        }
+        result
+    }
+
     pub async fn sftp(&self) -> Result<russh_sftp::client::SftpSession> {
         let ch = self.handle.channel_open_session().await?;
         ch.request_subsystem(true, "sftp").await?;
         Ok(russh_sftp::client::SftpSession::new(ch.into_stream()).await?)
+    }
+
+    /// Send bytes to a command's stdin while draining its SSH output.
+    pub async fn exec_from_reader(
+        &self,
+        cmd: &str,
+        input: &mut (impl AsyncRead + Unpin),
+        size: u64,
+        idle_timeout: Duration,
+    ) -> Result<(String, u32)> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let channel = tokio::time::timeout(idle_timeout, self.handle.channel_open_session())
+            .await
+            .context("The SSH server did not open a command channel")??;
+        tokio::time::timeout(idle_timeout, channel.exec(true, cmd))
+            .await
+            .context("The SSH server did not accept the command")??;
+        let (mut read, write) = channel.split();
+        let written = AtomicU64::new(0);
+        let send = async {
+            let mut buffer = vec![0; 64 * 1024];
+            while written.load(Ordering::Relaxed) < size {
+                let limit =
+                    (size - written.load(Ordering::Relaxed)).min(buffer.len() as u64) as usize;
+                let count = input.read(&mut buffer[..limit]).await?;
+                if count == 0 {
+                    bail!("The local upload ended before all bytes were read");
+                }
+                tokio::time::timeout(idle_timeout, write.data(&buffer[..count]))
+                    .await
+                    .context("The remote command stopped taking data")??;
+                written.fetch_add(count as u64, Ordering::Relaxed);
+            }
+            tokio::time::timeout(idle_timeout, write.eof())
+                .await
+                .context("Could not finish sending the archive")??;
+            Ok(())
+        };
+        let receive = async {
+            let mut output = Vec::new();
+            let mut status = None;
+            let mut eof = false;
+            while let Some(message) = read.wait().await {
+                match message {
+                    ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                        const LIMIT: usize = 64 * 1024;
+                        let keep = data.len().min(LIMIT);
+                        let drop = (output.len() + keep).saturating_sub(LIMIT);
+                        output.drain(..drop);
+                        output.extend_from_slice(&data[data.len() - keep..]);
+                    }
+                    ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                    ChannelMsg::Eof => eof = true,
+                    ChannelMsg::Failure => bail!("The server refused the command"),
+                    ChannelMsg::Close => break,
+                    _ => {}
+                }
+                if eof && status.is_some() {
+                    break;
+                }
+            }
+            Ok((
+                String::from_utf8_lossy(&output).into_owned(),
+                status.context("The remote command closed without reporting its exit status")?,
+            ))
+        };
+        tokio::pin!(send, receive);
+        let result = tokio::select! {
+            biased;
+            sent = &mut send => {
+                // Some readers finish at the archive end marker before the SSH EOF arrives.
+                if written.load(Ordering::Relaxed) == size {
+                    match tokio::time::timeout(idle_timeout, &mut receive).await {
+                        Ok(received) => received,
+                        Err(_) => Err(anyhow!("The remote command did not report completion")),
+                    }
+                } else {
+                    sent.and_then(|()| Err(anyhow!("The upload ended before all bytes were sent")))
+                }
+            }
+            received = &mut receive => match received {
+                Ok((_, 0)) if written.load(Ordering::Relaxed) != size => {
+                    Err(anyhow!("The remote command exited before the upload finished"))
+                }
+                other => other,
+            },
+        };
+        let _ = write.close().await;
+        result
     }
 
     pub async fn disconnect(&self) {
