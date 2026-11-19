@@ -28,12 +28,13 @@ const LOG_LIMIT: usize = 256 * 1024;
 const SCRIPT: &str = r#"
 S=; [ "$1" = sudo ] && S="sudo -n"
 for rt in docker podman; do
+  [ -z "$2" ] || [ "$2" = "$rt" ] || continue
   command -v $rt >/dev/null 2>&1 || continue
   out=$($S $rt ps -a --format '{{json .}}' 2>&1); rc=$?
   if [ $rc -eq 0 ]; then echo "@$rt"; else echo "@$rt-error"; fi
   printf '%s\n' "$out"
 done
-if command -v kubectl >/dev/null 2>&1; then
+if { [ -z "$2" ] || [ "$2" = kubectl ]; } && command -v kubectl >/dev/null 2>&1; then
   out=$(kubectl get pods -A --no-headers 2>&1); rc=$?
   if [ $rc -eq 0 ]; then echo "@kubectl"; else echo "@kubectl-error"; fi
   printf '%s\n' "$out"
@@ -217,11 +218,12 @@ pub struct Listing {
 
 /// With `sudo`, Docker and Podman run as `sudo -n` (passwordless sudo only), for users that
 /// are not in the docker group.
-pub async fn list(client: &SshClient, sudo: bool) -> Result<Listing> {
+pub async fn list(client: &SshClient, sudo: bool, runtime: Option<Runtime>) -> Result<Listing> {
     let command = format!(
-        "sh -c {} sh{}",
+        "sh -c {} sh {} {}",
         shell_quote(SCRIPT),
-        if sudo { " sudo" } else { "" }
+        if sudo { "sudo" } else { "user" },
+        runtime.map(Runtime::cli).unwrap_or("''"),
     );
     let (output, _) =
         tokio::time::timeout(LIST_TIMEOUT, client.exec_limited(&command, 2 * 1024 * 1024))
@@ -510,6 +512,7 @@ pub struct Browser {
     pub in_flight: bool,
     /// UI time of the last list request.
     pub last_poll: f64,
+    pub retry_runtime: Option<Runtime>,
     /// Label of the action running right now (`Stop web`).
     pub busy: Option<String>,
     /// Wait for a fresh list before offering another lifecycle command.
@@ -533,6 +536,34 @@ impl Browser {
             session,
             ..Default::default()
         };
+    }
+
+    pub fn apply_runtime_list(&mut self, runtime: Runtime, result: Result<Listing, String>) {
+        self.in_flight = false;
+        let mut listing = self.listing.take().unwrap_or_default();
+        listing.errors.retain(|(existing, _)| *existing != runtime);
+        match result {
+            Ok(update) => {
+                if let Some(error) = update
+                    .errors
+                    .into_iter()
+                    .find(|(failed, _)| *failed == runtime)
+                {
+                    listing.errors.push(error);
+                } else {
+                    listing.items.retain(|item| item.runtime != runtime);
+                    listing.items.extend(
+                        update
+                            .items
+                            .into_iter()
+                            .filter(|item| item.runtime == runtime),
+                    );
+                }
+            }
+            Err(error) => listing.errors.push((runtime, error)),
+        }
+        self.manager.reconcile(&listing);
+        self.listing = Some(listing);
     }
 
     pub fn apply_list(&mut self, result: Result<Listing, String>) {
@@ -573,6 +604,27 @@ mod tests {
 {"Command":"\"/docker-entrypoint.…\"","CreatedAt":"2026-10-01","ID":"3f2a9c1b7d44","Image":"nginx:1.27","Names":"web","Ports":"0.0.0.0:8080->80/tcp","State":"running","Status":"Up 2 hours"}
 {"ID":"aa11bb22cc33","Image":"redis:7","Names":"cache","Ports":"","State":"exited","Status":"Exited (0) 3 days ago"}
 "#;
+
+    #[test]
+    fn retry_replaces_only_the_selected_runtime() {
+        let mut browser = Browser::default();
+        browser.apply_list(Ok(parse(
+            "@docker-error\nsocket unavailable\n@kubectl\nops api-pod 1/1 Running 0 1h\n",
+        )));
+        browser.apply_runtime_list(Runtime::Docker, Err("timed out".into()));
+        let listing = browser.listing.as_ref().unwrap();
+        assert_eq!(listing.items[0].name, "api-pod");
+        assert_eq!(listing.errors, [(Runtime::Docker, "timed out".into())]);
+
+        browser.apply_runtime_list(Runtime::Docker, Ok(parse(
+            r#"@docker
+{"ID":"abcdef123456","Names":"web","Image":"nginx","State":"running"}
+"#,
+        )));
+        let listing = browser.listing.unwrap();
+        assert_eq!(listing.items.iter().map(|item| item.name.as_str()).collect::<Vec<_>>(), ["api-pod", "web"]);
+        assert!(listing.errors.is_empty());
+    }
 
     #[test]
     fn parses_docker_json_lines() {

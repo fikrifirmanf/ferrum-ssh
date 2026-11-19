@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use egui::{RichText, Sense};
 use egui_extras::{Column, TableBuilder};
 
-use super::forms;
+use super::{container_manager, forms};
 use crate::{
     containers::{
         Listing,
@@ -56,88 +56,42 @@ pub fn show(
         .map(|source| (source.key(), source.label(), source))
         .collect();
     sources.sort_by_key(|(key, _, _)| !state.selected.contains(key));
-    let compact = ui.available_height() < 400.0;
     let source_label = format!("Sources ({} selected)", state.selected.len());
-    let mut pick_sources = |ui: &mut egui::Ui| {
-        ui.horizontal_wrapped(|ui| {
-            forms::Input::bare("Find log sources")
-                .hint("Find log sources")
-                .width(215.0)
-                .show(ui, &mut state.source_query);
-            if ui
-                .add_enabled(
-                    !builds.pending,
-                    forms::Btn::secondary("Refresh sources").small(),
-                )
-                .clicked()
-            {
-                action = Some(Action::LoadBuilds);
-            }
-            if !state.selected.is_empty() && ui.add(forms::Btn::ghost("Clear sources")).clicked() {
-                state.clear_sources();
-            }
-            if state.selected.len() == MAX_SOURCES {
-                ui.label(format!("{} sources maximum", MAX_SOURCES));
-            }
-        });
-        if let Some(Err(error)) = &builds.listing {
-            ui.colored_label(pal.warning, format!("Build sources unavailable. {error}"));
-        }
-        let query = state.source_query.trim().to_lowercase();
-        let visible: Vec<_> = sources
-            .iter()
-            .filter(|(key, label, _)| {
-                query.is_empty()
-                    || label.to_lowercase().contains(&query)
-                    || key.to_lowercase().contains(&query)
-            })
-            .collect();
-        if visible.is_empty() {
-            ui.label(if builds.pending || containers.is_none() {
-                "Looking for sources…"
-            } else {
-                "No matching sources."
-            });
-        }
-        egui::ScrollArea::vertical()
-            .id_salt("unified-log-source-list")
-            .max_height((ui.available_height() * 0.32).clamp(45.0, 145.0))
-            .show_rows(ui, 20.0, visible.len(), |ui, range| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                for (key, label, _) in &visible[range] {
-                    let mut selected = state.selected.contains(key);
-                    if ui
-                        .add_enabled(
-                            selected || state.selected.len() < MAX_SOURCES,
-                            egui::Checkbox::new(&mut selected, label),
-                        )
-                        .on_hover_text(label)
-                        .changed()
-                    {
-                        state.change_source(key.clone(), selected);
-                    }
-                }
-            });
-    };
-    if compact {
-        let config = egui::containers::menu::MenuConfig::new()
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-        egui::containers::menu::MenuButton::new(source_label)
-            .config(config)
-            .ui(ui, |ui| {
-                forms::menu_padding(ui);
-                ui.set_min_width(300.0);
-                pick_sources(ui);
-            });
+    let compact = container_manager::compact_workspace(ui);
+    let mut logs;
+    let ui = if compact {
+        ui
     } else {
-        egui::CollapsingHeader::new(source_label)
-            .id_salt("unified-log-sources")
-            .default_open(true)
-            .show(ui, pick_sources);
-    }
+        let (mut source_ui, log_ui) = container_manager::split_workspace(ui, pal, 0.75, 520.0);
+        forms::heading(&mut source_ui, &source_label, 16.0);
+        action = show_sources(
+            &mut source_ui,
+            pal,
+            state,
+            &sources,
+            builds,
+            containers.is_none(),
+        )
+        .or(action);
+        logs = log_ui;
+        &mut logs
+    };
 
     ui.horizontal_wrapped(|ui| {
+        if compact {
+            let config = egui::containers::menu::MenuConfig::new()
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+            egui::containers::menu::MenuButton::new(source_label)
+                .config(config)
+                .ui(ui, |ui| {
+                    forms::menu_padding(ui);
+                    ui.set_min_width(280.0);
+                    action = show_sources(ui, pal, state, &sources, builds, containers.is_none())
+                        .or(action.take());
+                });
+        }
         forms::Input::bare("Search logs")
+            .height(44.0)
             .hint("Search logs")
             .icon(crate::icons::MAGNIFYING_GLASS)
             .width(215.0)
@@ -248,6 +202,15 @@ pub fn show(
         });
         return action;
     };
+    ui.label(
+        RichText::new(format!(
+            "{} selected · {} matching lines",
+            state.selected.len(),
+            rows.len()
+        ))
+        .size(12.0)
+        .color(pal.text_dim),
+    );
     for (source, error) in &snapshot.errors {
         ui.colored_label(pal.warning, format!("{source} · {error}"));
     }
@@ -263,6 +226,78 @@ pub fn show(
         return action;
     }
     show_rows(ui, pal, &rows, &mut state.selected_row);
+    action
+}
+
+fn show_sources(
+    ui: &mut egui::Ui,
+    pal: Palette,
+    state: &mut View,
+    sources: &[(String, String, Source)],
+    builds: &Page,
+    loading_containers: bool,
+) -> Option<Action> {
+    let mut action = None;
+    ui.horizontal_wrapped(|ui| {
+        forms::Input::bare("Find log sources")
+            .height(44.0)
+            .hint("Find log sources")
+            .width(ui.available_width().min(240.0))
+            .show(ui, &mut state.source_query);
+        if ui
+            .add_enabled(
+                !builds.pending,
+                forms::Btn::secondary("Refresh sources").small(),
+            )
+            .clicked()
+        {
+            action = Some(Action::LoadBuilds);
+        }
+        if !state.selected.is_empty() && ui.add(forms::Btn::ghost("Clear sources")).clicked() {
+            state.clear_sources();
+        }
+        if state.selected.len() == MAX_SOURCES {
+            ui.label(format!("{} sources maximum", MAX_SOURCES));
+        }
+    });
+    if let Some(Err(error)) = &builds.listing {
+        ui.colored_label(pal.warning, format!("Build sources unavailable. {error}"));
+    }
+    let query = state.source_query.trim().to_lowercase();
+    let visible: Vec<_> = sources
+        .iter()
+        .filter(|(key, label, _)| {
+            query.is_empty()
+                || label.to_lowercase().contains(&query)
+                || key.to_lowercase().contains(&query)
+        })
+        .collect();
+    if visible.is_empty() {
+        ui.label(if builds.pending || loading_containers {
+            "Looking for sources…"
+        } else {
+            "No matching sources."
+        });
+    }
+    egui::ScrollArea::vertical()
+        .id_salt("unified-log-source-list")
+        .max_height((ui.available_height() - 28.0).clamp(72.0, 440.0))
+        .show_rows(ui, 36.0, visible.len(), |ui, range| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            for (key, label, _) in &visible[range] {
+                let mut selected = state.selected.contains(key);
+                if ui
+                    .add_enabled(
+                        selected || state.selected.len() < MAX_SOURCES,
+                        egui::Checkbox::new(&mut selected, label),
+                    )
+                    .on_hover_text(label)
+                    .changed()
+                {
+                    state.change_source(key.clone(), selected);
+                }
+            }
+        });
     action
 }
 

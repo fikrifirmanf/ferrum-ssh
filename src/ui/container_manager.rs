@@ -1,10 +1,9 @@
 //! Full-width container workspace, sharing the terminal sidebar's connection and state.
 use std::collections::BTreeMap;
 
-use egui::{RichText, Sense};
-use egui_extras::{Column, TableBuilder};
+use egui::{Color32, RichText, Sense, Ui};
 
-use super::{container_view::Source, forms};
+use super::{container_view::Source, forms, library_list};
 use crate::containers::{
     Action, Browser, Item, Runtime, StateFilter,
     inventory::{Kind, Request},
@@ -49,19 +48,45 @@ pub fn show(
     source: Source,
     log_presets: Option<&[crate::model::LogFilterPreset]>,
 ) -> Option<Command> {
+    let confirmation_id = ui.make_persistent_id(("container-action", browser.session));
     let host = match source {
         Source::Ssh(host) => host,
+        Source::Connecting(host) => {
+            forms::heading(ui, "Container Manager", crate::themes::tokens::TITLE);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(format!("Connecting to {host}…"));
+            });
+            if ui
+                .add(forms::Btn::ghost("Back to terminal").height(44.0))
+                .clicked()
+            {
+                browser.manager.open = false;
+            }
+            return None;
+        }
         Source::Disconnected(host) => {
-            forms::heading(ui, "Container manager", crate::themes::tokens::TITLE);
+            ui.data_mut(|data| data.remove::<(String, Action)>(confirmation_id));
+            forms::heading(ui, "Container Manager", crate::themes::tokens::TITLE);
             ui.label(format!(
                 "{host} is disconnected. Reconnect the SSH session to manage containers."
             ));
             if ui.add(forms::Btn::secondary("Back to terminal")).clicked() {
                 browser.manager.open = false;
             }
+            if let Some(listing) = &browser.listing {
+                ui.label(
+                    RichText::new(format!(
+                        "Last known inventory · {} workloads",
+                        listing.items.len()
+                    ))
+                    .color(pal.text_dim),
+                );
+            }
             return None;
         }
         Source::Unsupported => {
+            ui.data_mut(|data| data.remove::<(String, Action)>(confirmation_id));
             ui.label("Open an SSH session to manage remote containers.");
             if ui.add(forms::Btn::secondary("Back to terminal")).clicked() {
                 browser.manager.open = false;
@@ -70,13 +95,15 @@ pub fn show(
         }
     };
     ui.horizontal_wrapped(|ui| {
-        forms::heading(ui, "Container manager", crate::themes::tokens::TITLE);
-        ui.label(RichText::new(host).monospace().color(pal.text_dim));
+        forms::heading(ui, "Container Manager", crate::themes::tokens::TITLE);
+        ui.label(RichText::new("SSH connected").small().color(pal.success));
+        ui.label(RichText::new(host).small().monospace().color(pal.text_dim));
         if ui
             .add(forms::Btn::secondary("Back to terminal").small())
             .clicked()
         {
             browser.manager.open = false;
+            ui.data_mut(|data| data.remove::<(String, Action)>(confirmation_id));
         }
     });
     forms::segmented_tabs(
@@ -91,23 +118,43 @@ pub fn show(
             (Section::Logs, "Unified logs"),
         ],
     );
+    ui.separator();
     if let Section::Inventory(kind) = browser.manager.section {
-        return super::container_inventory::show(
-            ui,
-            pal,
-            kind,
-            browser.manager.inventory.page(kind),
-            &mut browser.use_sudo,
-        )
-        .map(|action| match action {
-            super::container_inventory::Action::Inventory(request) => Command::Inventory(request),
-            super::container_inventory::Action::BrowseVolume { name, directory, revision } => {
-                Command::BrowseVolume { name, directory, revision }
-            }
-            super::container_inventory::Action::ExportVolume(name) => Command::ExportVolume(name),
-            super::container_inventory::Action::EditVolume(request) => Command::EditVolume(request),
-            super::container_inventory::Action::ImportVolume(name) => Command::ImportVolume(name),
-        });
+        return ui
+            .push_id(("container-inventory", browser.session), |ui| {
+                super::container_inventory::show(
+                    ui,
+                    pal,
+                    kind,
+                    browser.manager.inventory.page(kind),
+                    &mut browser.use_sudo,
+                    host,
+                )
+            })
+            .inner
+            .map(|action| match action {
+                super::container_inventory::Action::Inventory(request) => {
+                    Command::Inventory(request)
+                }
+                super::container_inventory::Action::BrowseVolume {
+                    name,
+                    directory,
+                    revision,
+                } => Command::BrowseVolume {
+                    name,
+                    directory,
+                    revision,
+                },
+                super::container_inventory::Action::ExportVolume(name) => {
+                    Command::ExportVolume(name)
+                }
+                super::container_inventory::Action::EditVolume(request) => {
+                    Command::EditVolume(request)
+                }
+                super::container_inventory::Action::ImportVolume(name) => {
+                    Command::ImportVolume(name)
+                }
+            });
     }
     if browser.manager.section == Section::Logs {
         return super::container_logs::show(
@@ -130,100 +177,206 @@ pub fn show(
             super::container_logs::Action::Export(rows) => Command::ExportLogs(rows),
         });
     }
+    if let Some(command) = confirm_action(ui, pal, browser, host, confirmation_id) {
+        return Some(command);
+    }
     feedback(ui, pal, browser);
-    let compact = ui.available_height() < 430.0;
-    if (compact || browser.manager.tab == DetailTab::Ports)
-        && browser.manager.focus_details
-        && browser.manager.selected.is_some()
+    let compact = compact_workspace(ui);
+    if compact && browser.manager.focus_details && browser.manager.selected.is_some() {
+        return details(ui, pal, browser, confirmation_id, true);
+    }
+    if compact
+        || browser
+            .listing
+            .as_ref()
+            .is_none_or(|listing| listing.items.is_empty())
     {
-        if ui
-            .add(forms::Btn::secondary("All containers").small())
-            .clicked()
-        {
-            browser.manager.focus_details = false;
+        workload_list(ui, pal, browser);
+        None
+    } else {
+        let (mut list, mut inspector) = split_workspace(ui, pal, 0.38, 340.0);
+        if workload_list(&mut list, pal, browser) {
+            details(&mut inspector, pal, browser, confirmation_id, false)
+        } else {
+            select_workload(&mut inspector, pal);
+            None
         }
-        return details(ui, pal, browser);
+    }
+}
+
+pub(super) fn compact_workspace(ui: &Ui) -> bool {
+    ui.available_width() < 820.0 || ui.available_height() < 430.0
+}
+
+/// Reserve the workspace once, so the table and detail output can scroll independently.
+pub(super) fn split_workspace(ui: &mut Ui, pal: Palette, share: f32, min_right: f32) -> (Ui, Ui) {
+    let (area, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+    let boundary = area.right() - (area.width() * share).max(min_right);
+    let left = egui::Rect::from_min_max(area.min, egui::pos2(boundary - 12.0, area.bottom()));
+    let right = egui::Rect::from_min_max(
+        egui::pos2(boundary + 12.0, area.top()),
+        area.max - egui::vec2(8.0, 0.0),
+    );
+    let surface = egui::Rect::from_min_max(egui::pos2(boundary, area.top()), area.max);
+    super::glass::pane(ui, surface, 8.0, super::glass::Tier::Surface(pal.panel));
+    ui.painter()
+        .vline(boundary, area.y_range(), egui::Stroke::new(1.0, pal.border));
+    let mut pane = |id, rect: egui::Rect| {
+        let mut child = ui.new_child(egui::UiBuilder::new().id_salt(id).max_rect(rect));
+        child.set_clip_rect(ui.clip_rect().intersect(rect));
+        child
+    };
+    (pane("workspace-left", left), pane("workspace-right", right))
+}
+
+fn request_row_focus(ui: &Ui, key: Option<&str>) {
+    if let Some(key) = key {
+        ui.data_mut(|data| {
+            data.insert_temp(ui.scope_id().with("manager-row-focus"), key.to_owned())
+        });
+    }
+}
+
+pub(super) fn row_label(
+    ui: &mut Ui,
+    name: &str,
+    secondary: Option<&str>,
+    selected: bool,
+    pal: Palette,
+) -> egui::Response {
+    let rect = ui.max_rect();
+    let response = ui.interact(rect, ui.scope_id().with("manager-row"), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, name)
+    });
+    if selected || response.has_focus() {
+        let marker = egui::Rect::from_min_size(rect.left_top(), egui::vec2(4.0, rect.height()));
+        ui.painter().rect_filled(marker, 0.0, pal.accent);
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect.shrink(1.0),
+            4.0,
+            egui::Stroke::new(2.0, pal.accent),
+            egui::StrokeKind::Inside,
+        );
+        if ui.input(|input| input.key_pressed(egui::Key::Tab)) {
+            response.scroll_to_me(None);
+        }
+    }
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.vertical(|ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(name)
+                        .family(crate::fonts::semibold())
+                        .color(pal.text),
+                )
+                .truncate()
+                .selectable(false),
+            );
+            if let Some(secondary) = secondary {
+                ui.add(
+                    egui::Label::new(RichText::new(secondary).size(12.0).color(pal.text_dim))
+                        .truncate()
+                        .selectable(false),
+                );
+            }
+        });
+    });
+    response.on_hover_text(match secondary {
+        Some(value) => format!("{name}\n{value}"),
+        None => name.to_owned(),
+    })
+}
+
+fn refresh_workloads(browser: &mut Browser) {
+    browser.retry_runtime = None;
+    browser.last_poll = f64::NEG_INFINITY;
+    browser.manager.last_stats_poll = f64::NEG_INFINITY;
+}
+
+fn workload_list(ui: &mut Ui, pal: Palette, browser: &mut Browser) -> bool {
+    if browser
+        .listing
+        .as_ref()
+        .is_none_or(|listing| listing.items.is_empty())
+    {
+        ui.add_space(12.0);
+        if browser
+            .listing
+            .as_ref()
+            .is_some_and(|listing| listing.errors.is_empty())
+        {
+            forms::heading(ui, "No containers or pods", 16.0);
+        } else if browser.in_flight || browser.error.is_none() && browser.listing.is_none() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading Docker, Podman and Kubernetes containers…");
+            });
+        }
+        runtime_errors(ui, pal, browser);
+        if !browser.in_flight
+            && ui
+                .add(forms::Btn::secondary("Refresh containers").height(44.0))
+                .clicked()
+        {
+            refresh_workloads(browser);
+        }
+        return false;
     }
     ui.horizontal_wrapped(|ui| {
+        const FILTERS: [(StateFilter, &str); 4] = [
+            (StateFilter::All, "All states"),
+            (StateFilter::Running, "Running"),
+            (StateFilter::Paused, "Paused"),
+            (StateFilter::Stopped, "Stopped"),
+        ];
         forms::Input::bare("Search containers")
+            .height(44.0)
             .hint("Search containers, images or projects")
             .icon(crate::icons::MAGNIFYING_GLASS)
-            .width(320.0)
+            .width((ui.available_width() - 248.0).clamp(150.0, 320.0))
             .show(ui, &mut browser.filter);
+        let current = FILTERS
+            .iter()
+            .find(|(filter, _)| *filter == browser.state_filter)
+            .map_or("All states", |(_, text)| *text);
+        forms::select(ui, "container-state-filter", 116.0, current, false, |ui| {
+            for (filter, text) in FILTERS {
+                forms::select_value(ui, &mut browser.state_filter, filter, text);
+            }
+        })
+        .on_hover_text("Filter by state");
         if ui
             .add_enabled(
                 !browser.in_flight,
-                forms::Btn::secondary("Refresh containers").small(),
+                forms::Btn::secondary("Refresh").height(44.0),
             )
+            .on_hover_text("Refresh containers and resource samples")
             .clicked()
         {
-            browser.last_poll = f64::NEG_INFINITY;
-            browser.manager.last_stats_poll = f64::NEG_INFINITY;
+            refresh_workloads(browser);
         }
         if browser.in_flight {
             ui.spinner();
         }
     });
-    forms::segmented(
-        ui,
-        "container-state-filter",
-        &mut browser.state_filter,
-        &[
-            (StateFilter::All, "All states"),
-            (StateFilter::Running, "Running"),
-            (StateFilter::Paused, "Paused"),
-            (StateFilter::Stopped, "Stopped"),
-        ],
-    );
+    runtime_errors(ui, pal, browser);
     let Some(listing) = &browser.listing else {
-        ui.label("Loading Docker, Podman and Kubernetes containers…");
-        return None;
+        return false;
     };
-    for (runtime, error) in &listing.errors {
-        ui.colored_label(pal.warning, format!("{}: {error}", runtime.label()));
-        if crate::containers::is_permission_error(error)
-            && !browser.use_sudo
-            && ui
-                .add(forms::Btn::secondary("Retry with sudo").small())
-                .clicked()
-        {
-            browser.use_sudo = true;
-            browser.last_poll = f64::NEG_INFINITY;
-            browser.manager.last_stats_poll = f64::NEG_INFINITY;
-            browser.manager.invalidate_detail();
-        }
-    }
-    let running = listing
-        .items
-        .iter()
-        .filter(|item| item.is_running())
-        .count();
-    ui.horizontal_wrapped(|ui| {
-        ui.label(format!(
-            "{} containers and pods · {running} running",
-            listing.items.len()
-        ));
-        if let Some(updated) = browser.manager.stats_updated {
-            let age = updated.elapsed().as_secs();
-            ui.label(
-                RichText::new(format!(
-                    "Resources updated {age}s ago{}",
-                    if age > 15 { " · stale" } else { "" }
-                ))
-                .small()
-                .color(if age > 15 { pal.warning } else { pal.text_dim }),
-            );
-        }
-    });
     if let Some(error) = &browser.manager.stats_error {
         ui.colored_label(pal.warning, format!("Resources unavailable: {error}"));
     }
     let query = browser.filter.trim().to_lowercase();
-    let mut groups: BTreeMap<String, Vec<Item>> = BTreeMap::new();
+    let mut groups = BTreeMap::<(_, _, _), Vec<Item>>::new();
     for item in &listing.items {
         if !browser.state_filter.matches(item) {
             continue;
         }
+        let standalone = item.project.is_none() && item.runtime != Runtime::Kubernetes;
         let project = item
             .project
             .as_deref()
@@ -245,20 +398,34 @@ pub fn show(
             continue;
         }
         groups
-            .entry(format!("{} / {project}", item.runtime.label()))
+            .entry((item.runtime.label(), standalone, project))
             .or_default()
             .push(item.clone());
     }
+    let selected_key = browser.manager.selected.as_deref();
+    let mut selection_matches = groups
+        .values()
+        .flatten()
+        .any(|item| selected_key.is_some_and(|key| item.key() == key));
+    let count = groups.values().map(Vec::len).sum::<usize>();
+    let running = groups
+        .values()
+        .flatten()
+        .filter(|item| item.is_running())
+        .count();
+    let collapsed = &mut browser.manager.collapsed_groups;
     let mut rows = Vec::new();
-    for (name, mut items) in groups {
+    for ((runtime, _, project), mut items) in groups {
+        let name = format!("{runtime} / {project}");
+        let closed = collapsed.contains(&name);
         items.sort_by(|a, b| a.name.cmp(&b.name));
-        rows.push(Row::Group(name, items.len()));
-        rows.extend(items.into_iter().map(Row::Container));
+        rows.push(Row::Group(name, items.len(), closed));
+        if !closed {
+            rows.extend(items.into_iter().map(Row::Container));
+        }
     }
     if rows.is_empty() {
-        ui.label(if listing.items.is_empty() {
-            "No containers found on this server."
-        } else if browser.state_filter == StateFilter::All {
+        ui.label(if browser.state_filter == StateFilter::All {
             "No containers match your search."
         } else {
             "No containers match these filters."
@@ -268,159 +435,328 @@ pub fn show(
         } else {
             "Clear filters"
         };
-        if !listing.items.is_empty() && ui.add(forms::Btn::ghost(clear_label)).clicked() {
+        if ui
+            .add(forms::Btn::ghost(clear_label).height(44.0))
+            .clicked()
+        {
             browser.filter.clear();
             browser.state_filter = StateFilter::All;
         }
+        return false;
     }
-    let height = if compact {
-        (ui.available_height() - 40.0).max(80.0)
+    let available = ui.available_rect_before_wrap();
+    let footer_height = 28.0;
+    let table_height = (available.height() - footer_height).max(0.0);
+    let table_rect =
+        egui::Rect::from_min_size(available.min, egui::vec2(available.width(), table_height));
+    let mut table_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("workload-table-area")
+            .max_rect(table_rect),
+    );
+    table_ui.set_clip_rect(ui.clip_rect().intersect(table_rect));
+    let focus_id = ui.scope_id().with("manager-row-focus");
+    let focus = ui.data_mut(|data| data.remove_temp::<String>(focus_id));
+    let mut selection = None;
+    let mut group_change = None;
+    let row_height = if ui.available_height() < 430.0 {
+        crate::themes::tokens::COMPACT_ROW
     } else {
-        // The details below need about 330 points for a few log lines; the table gives way.
-        (ui.available_height() * 0.4)
-            .min(ui.available_height() - 330.0)
-            .clamp(80.0, 280.0)
+        crate::themes::tokens::ROW
     };
-    egui::ScrollArea::horizontal()
-        .id_salt("container-table-horizontal")
-        .show(ui, |ui| {
-            ui.set_min_width(820.0);
-            // The same flat, neutral fill as a selected host row, not a solid slab.
-            ui.visuals_mut().selection.bg_fill = super::glass::selection_fill(ui);
-            ui.visuals_mut().widgets.hovered.weak_bg_fill = super::glass::hover_wash(ui);
-            TableBuilder::new(ui)
-                .id_salt("container-table")
-                .striped(false)
-                .sense(Sense::click())
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::remainder().at_least(180.0).clip(true))
-                .column(Column::remainder().at_least(180.0).clip(true))
-                .column(Column::initial(110.0).at_least(90.0).clip(true))
-                .column(Column::exact(70.0))
-                .column(Column::initial(130.0).at_least(90.0).clip(true))
-                .column(Column::initial(140.0).at_least(80.0).clip(true))
-                .max_scroll_height(height)
-                .min_scrolled_height(height)
-                .auto_shrink([false, false])
-                .header(28.0, |mut header| {
-                    for title in [
-                        "NAME / PROJECT",
-                        "IMAGE",
-                        "STATE / HEALTH",
-                        "CPU",
-                        "MEMORY",
-                        "PORTS",
-                    ] {
-                        header.col(|ui| {
-                            ui.label(RichText::new(title).small().color(pal.text_dim));
-                        });
+    table_ui.spacing_mut().item_spacing.y = 0.0;
+    let (header, _) =
+        table_ui.allocate_exact_size(egui::vec2(table_ui.available_width(), 28.0), Sense::hover());
+    let header_cells = workload_columns(header, row_height);
+    let font = egui::FontId::new(12.0, crate::fonts::medium());
+    for (index, label) in ["Name / image", "State / health", "CPU", "Memory"]
+        .into_iter()
+        .enumerate()
+    {
+        let cell = header_cells[index];
+        if cell.width() > 0.0 {
+            library_list::text(
+                &table_ui,
+                cell,
+                label,
+                font.clone(),
+                pal.text_dim,
+                index >= 2,
+            );
+        }
+    }
+    table_ui.painter().hline(
+        (header.left() + 12.0)..=(header.right() - 12.0),
+        header.bottom(),
+        egui::Stroke::new(1.0, pal.border),
+    );
+    table_ui.add_space(4.0);
+
+    let mut positions = Vec::with_capacity(rows.len() + 1);
+    positions.push(0.0);
+    for row in &rows {
+        let height = if matches!(row, Row::Group(..)) {
+            32.0
+        } else {
+            row_height + 2.0
+        };
+        positions.push(positions.last().copied().unwrap_or_default() + height);
+    }
+    let restore_index = focus.as_ref().and_then(|key| {
+        rows.iter()
+            .position(|row| matches!(row, Row::Container(item) if item.key() == *key))
+    });
+    let mut scroll = egui::ScrollArea::vertical()
+        .id_salt("container-table")
+        .auto_shrink([false, false]);
+    if let Some(index) = restore_index {
+        scroll = scroll.vertical_scroll_offset(positions[index]);
+    }
+    scroll.show_viewport(&mut table_ui, |ui, viewport| {
+        let scope = ui.scope_id();
+        let start = positions
+            .partition_point(|y| *y <= viewport.top())
+            .saturating_sub(2);
+        let end = positions
+            .partition_point(|y| *y < viewport.bottom())
+            .saturating_add(1)
+            .min(rows.len());
+        ui.add_space(positions[start]);
+        for (index, row) in rows.iter().enumerate().take(end).skip(start) {
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(header.width(), positions[index + 1] - positions[index]),
+                Sense::hover(),
+            );
+            match row {
+                Row::Group(name, count, closed) => {
+                    let response = library_list::group_header(
+                        ui,
+                        rect,
+                        scope.with(("group", name)),
+                        name,
+                        *count,
+                        *closed,
+                        pal,
+                    );
+                    if response.clicked() {
+                        group_change = Some(name.clone());
                     }
-                })
-                .body(|body| {
-                    // Group titles sit close to their rows; containers keep a full row.
-                    let heights = rows.iter().map(|row| match row {
-                        Row::Group(..) => 30.0,
-                        Row::Container(_) => 36.0,
-                    });
-                    body.heterogeneous_rows(heights, |mut row| match &rows[row.index()] {
-                        Row::Group(name, count) => {
-                            row.col(|ui| {
-                                ui.label(
-                                    RichText::new(name)
-                                        .size(13.0)
-                                        .family(crate::fonts::semibold())
-                                        .color(pal.text_dim),
-                                );
-                                ui.label(
-                                    RichText::new(count.to_string()).size(13.0).color(pal.faint),
-                                );
-                            });
-                            for _ in 0..5 {
-                                row.col(|_| {});
-                            }
-                        }
-                        Row::Container(item) => {
-                            let selected = browser.manager.selected.as_deref() == Some(&item.key());
-                            row.set_selected(selected);
-                            row.col(|ui| {
-                                // The whole row selects; the name carries the same marker as a
-                                // selected host instead of a chip of its own.
-                                if selected {
-                                    let r = ui.max_rect();
-                                    ui.painter().rect_filled(
-                                        egui::Rect::from_min_size(
-                                            egui::pos2(r.left(), r.center().y - 10.0),
-                                            egui::vec2(3.0, 20.0),
-                                        ),
-                                        1.5,
-                                        pal.accent,
-                                    );
-                                }
-                                ui.add_space(12.0);
-                                ui.add(
-                                    egui::Label::new(RichText::new(&item.name).color(pal.text))
-                                        .selectable(false)
-                                        .truncate(),
-                                )
-                                .on_hover_text(format!("{}\n{}", item.name, item.scope));
-                            });
-                            row.col(|ui| {
-                                ui.label(RichText::new(&item.detail).color(pal.text))
-                                    .on_hover_text(&item.detail);
-                            });
-                            row.col(|ui| {
-                                ui.label(RichText::new(health(item)).color(
-                                    if item.is_failing() || item.status.contains("unhealthy") {
-                                        pal.danger
-                                    } else {
-                                        pal.text
-                                    },
-                                ));
-                            });
-                            let sample = browser
-                                .manager
-                                .stats
-                                .get(&item.key())
-                                .and_then(|history| history.back());
-                            row.col(|ui| {
-                                ui.label(
-                                    RichText::new(
-                                        sample
-                                            .and_then(|s| s.stats.cpu)
-                                            .map(|cpu| format!("{cpu:.1}%"))
-                                            .unwrap_or_else(|| "—".into()),
-                                    )
-                                    .color(pal.steel),
-                                );
-                            });
-                            row.col(|ui| {
-                                ui.label(
-                                    RichText::new(
-                                        sample.map(|s| s.stats.memory.as_str()).unwrap_or("—"),
-                                    )
-                                    .color(pal.steel),
-                                );
-                            });
-                            row.col(|ui| {
-                                ui.label(&item.ports).on_hover_text(&item.ports);
-                            });
-                            if row.response().clicked() {
-                                browser.manager.select(item.key());
-                            }
-                        }
-                    });
-                });
-        });
-    ui.separator();
-    if compact {
-        None
-    } else {
-        details(ui, pal, browser)
+                }
+                Row::Container(item) => {
+                    let rect = egui::Rect::from_min_max(rect.min, rect.max - egui::vec2(0.0, 2.0));
+                    let key = item.key();
+                    let is_selected = browser.manager.selected.as_ref() == Some(&key);
+                    let subtitle = if item.runtime == Runtime::Kubernetes {
+                        format!("Ready {}", item.detail)
+                    } else {
+                        item.detail.clone()
+                    };
+                    let response = library_list::resource_row(
+                        ui,
+                        rect,
+                        scope.with(&key),
+                        crate::icons::PACKAGE,
+                        (&item.name, &subtitle),
+                        is_selected,
+                        pal,
+                    );
+                    if restore_index == Some(index) {
+                        response.request_focus();
+                    }
+                    if response.clicked() {
+                        selection = Some(key.clone());
+                    }
+                    let [identity, state, cpu, memory] = workload_columns(rect, row_height);
+                    library_list::identity(
+                        ui,
+                        egui::Rect::from_min_max(rect.min, identity.max),
+                        &item.name,
+                        &subtitle,
+                        pal,
+                    );
+                    workload_state(ui, state, item, pal);
+                    let sample = browser
+                        .manager
+                        .stats
+                        .get(&key)
+                        .and_then(|history| history.back());
+                    let cpu_value = sample
+                        .and_then(|s| s.stats.cpu)
+                        .map(|value| format!("{value:.1}%"));
+                    metric_cell(ui, cpu, cpu_value.as_deref(), pal);
+                    if memory.width() > 0.0 {
+                        metric_cell(ui, memory, sample.map(|s| s.stats.memory.as_str()), pal);
+                    }
+                }
+            }
+        }
+        ui.set_min_height(*positions.last().unwrap_or(&0.0));
+    });
+    let footer_rect = egui::Rect::from_min_max(
+        egui::pos2(available.left(), table_rect.bottom()),
+        available.max,
+    );
+    ui.painter().hline(
+        footer_rect.x_range(),
+        footer_rect.top(),
+        egui::Stroke::new(1.0, pal.border),
+    );
+    let mut footer = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt("workload-footer")
+            .max_rect(footer_rect.shrink2(egui::vec2(0.0, 4.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    footer.set_clip_rect(ui.clip_rect().intersect(footer_rect));
+    footer.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new(format!("{count} workloads · {running} running"))
+                .size(12.0)
+                .color(pal.text_dim),
+        );
+        if let Some(updated) = browser.manager.stats_updated {
+            let age = updated.elapsed().as_secs();
+            ui.label(
+                RichText::new(format!(
+                    "Resources updated {age}s ago{}",
+                    if age > 15 { " · Stale" } else { "" }
+                ))
+                .size(12.0)
+                .color(if age > 15 { pal.warning } else { pal.text_dim }),
+            );
+        }
+    });
+    if let Some(name) = group_change {
+        if !collapsed.remove(&name) {
+            collapsed.insert(name);
+        }
+    }
+    if let Some(key) = selection {
+        ui.data_mut(|data| data.insert_temp(ui.scope_id().with("manager-detail-focus"), true));
+        browser.manager.select(key);
+        selection_matches = true;
+    }
+    selection_matches
+}
+
+fn runtime_errors(ui: &mut Ui, pal: Palette, browser: &mut Browser) {
+    let mut retry = None;
+    let mut sudo = false;
+    if let Some(listing) = &browser.listing {
+        for (runtime, error) in &listing.errors {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(
+                    pal.warning,
+                    format!("{} unavailable · {error}", runtime.label()),
+                );
+                if *runtime != Runtime::Kubernetes
+                    && crate::containers::is_permission_error(error)
+                    && !browser.use_sudo
+                {
+                    sudo |= ui
+                        .add_enabled(!browser.in_flight, forms::Btn::ghost("Retry with sudo"))
+                        .clicked();
+                } else {
+                    if ui
+                        .add_enabled(
+                            !browser.in_flight,
+                            forms::Btn::ghost(format!("Retry {}", runtime.label())),
+                        )
+                        .clicked()
+                    {
+                        retry = Some(*runtime);
+                    }
+                }
+            });
+        }
+    }
+    if sudo {
+        browser.use_sudo = true;
+        browser.manager.invalidate_detail();
+        refresh_workloads(browser);
+    } else if let Some(runtime) = retry {
+        browser.retry_runtime = Some(runtime);
+        browser.last_poll = f64::NEG_INFINITY;
+    }
+}
+
+fn workload_columns(rect: egui::Rect, row_height: f32) -> [egui::Rect; 4] {
+    let columns = rect.width() >= 420.0;
+    let right = rect.right() - 12.0;
+    let cpu_right = right - if columns { 132.0 } else { 0.0 };
+    let state_right = cpu_right - 70.0;
+    let state_left = state_right - if columns { 112.0 } else { 96.0 };
+    let identity_left = rect.left() + if row_height < 50.0 { 52.0 } else { 56.0 };
+    let cell = |left, right| {
+        egui::Rect::from_min_max(
+            egui::pos2(left, rect.top()),
+            egui::pos2(right, rect.bottom()),
+        )
+    };
+    [
+        cell(identity_left, state_left - 12.0),
+        cell(state_left, state_right - 8.0),
+        cell(state_right, cpu_right),
+        cell(if columns { cpu_right + 12.0 } else { right }, right),
+    ]
+}
+
+fn workload_state(ui: &Ui, cell: egui::Rect, item: &Item, pal: Palette) {
+    let health = health(item, pal);
+    let (top, bottom) = library_list::lines(cell);
+    let state_cell = if health.is_some() { top } else { cell };
+    let color = state_color(item, pal);
+    ui.painter()
+        .circle_filled(state_cell.left_center() + egui::vec2(3.0, 0.0), 3.0, color);
+    let text_rect =
+        egui::Rect::from_min_max(state_cell.min + egui::vec2(12.0, 0.0), state_cell.max);
+    library_list::text(
+        ui,
+        text_rect,
+        display_state(item),
+        egui::FontId::proportional(13.0),
+        color,
+        false,
+    );
+    if let Some((label, ink)) = health {
+        let text_rect = egui::Rect::from_min_max(bottom.min + egui::vec2(12.0, 0.0), bottom.max);
+        library_list::text(
+            ui,
+            text_rect,
+            label,
+            egui::FontId::proportional(12.0),
+            ink,
+            false,
+        );
+    }
+}
+
+fn metric_cell(ui: &Ui, cell: egui::Rect, value: Option<&str>, pal: Palette) {
+    library_list::text(
+        ui,
+        cell,
+        value.unwrap_or("—"),
+        egui::FontId::monospace(12.0),
+        if value.is_some() {
+            pal.steel
+        } else {
+            pal.text_dim
+        },
+        true,
+    );
+    if let Some(value) = value {
+        ui.interact(
+            cell,
+            ui.scope_id()
+                .with(("metric", cell.min.x.to_bits(), cell.min.y.to_bits())),
+            Sense::hover(),
+        )
+        .on_hover_text(value);
     }
 }
 
 enum Row {
-    Group(String, usize),
+    Group(String, usize, bool),
     Container(Item),
 }
 
@@ -443,17 +779,113 @@ fn feedback(ui: &mut egui::Ui, pal: Palette, browser: &Browser) {
     }
 }
 
-fn health(item: &Item) -> &str {
-    if item.status.contains("unhealthy") {
-        "Unhealthy"
-    } else if item.status.contains("(healthy)") {
-        "Healthy"
+fn display_state(item: &Item) -> &str {
+    if item.is_running() {
+        "Running"
     } else {
-        &item.state
+        match item.state.as_str() {
+            "paused" => "Paused",
+            "exited" | "stopped" => "Stopped",
+            "created" | "configured" | "initialized" => "Created",
+            "restarting" => "Restarting",
+            "dead" => "Dead",
+            state => state,
+        }
     }
 }
 
-fn details(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<Command> {
+fn state_color(item: &Item, pal: Palette) -> Color32 {
+    if item.is_failing() {
+        pal.danger
+    } else if item.is_running() {
+        pal.success
+    } else if item.state == "paused" {
+        pal.warning
+    } else {
+        pal.text_dim
+    }
+}
+
+fn health(item: &Item, pal: Palette) -> Option<(&'static str, Color32)> {
+    if item.status.contains("unhealthy") {
+        Some(("Unhealthy", pal.danger))
+    } else if item.status.contains("(healthy)") {
+        Some(("Healthy", pal.text_dim))
+    } else if item.status.contains("health: starting") {
+        Some(("Health starting", pal.warning))
+    } else {
+        None
+    }
+}
+
+fn confirm_action(
+    ui: &Ui,
+    pal: Palette,
+    browser: &Browser,
+    host: &str,
+    id: egui::Id,
+) -> Option<Command> {
+    let (key, action) = ui.data(|data| data.get_temp::<(String, Action)>(id))?;
+    let item = browser
+        .listing
+        .as_ref()
+        .and_then(|listing| listing.items.iter().find(|item| item.key() == key));
+    let Some(item) = item.filter(|item| item.actions().contains(&action)) else {
+        ui.data_mut(|data| data.remove::<(String, Action)>(id));
+        return None;
+    };
+    let modal = egui::Modal::new(id)
+        .backdrop_color(pal.scrim)
+        .show(ui.ctx(), |ui| {
+            ui.set_max_width(400.0);
+            forms::heading(ui, &format!("{} {}?", action.label(), item.name), 16.0);
+            ui.label(format!(
+                "{} on {host} may interrupt active connections.",
+                item.name
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let cancel = ui
+                    .add(forms::Btn::secondary("Cancel").height(44.0))
+                    .clicked();
+                let label = format!("{} container", action.label());
+                let confirm = ui
+                    .add_enabled(
+                        browser.can_act(),
+                        if action == Action::Stop {
+                            forms::Btn::danger(label).height(44.0)
+                        } else {
+                            forms::Btn::primary(label).height(44.0)
+                        },
+                    )
+                    .clicked();
+                (cancel, confirm)
+            })
+            .inner
+        });
+    let (cancel, confirm) = modal.inner;
+    if cancel || confirm || modal.should_close() {
+        ui.data_mut(|data| data.remove::<(String, Action)>(id));
+    }
+    confirm.then(|| Command::Action(item.clone(), action))
+}
+
+fn select_workload(ui: &mut Ui, pal: Palette) {
+    ui.add_space(12.0);
+    forms::heading(ui, "Select a workload", 16.0);
+    ui.label(
+        RichText::new("Choose a row to see its logs, resources and configuration.")
+            .color(pal.text_dim),
+    );
+}
+
+fn details(
+    ui: &mut Ui,
+    pal: Palette,
+    browser: &mut Browser,
+    confirmation_id: egui::Id,
+    compact: bool,
+) -> Option<Command> {
     let item = browser
         .listing
         .as_ref()
@@ -464,30 +896,114 @@ fn details(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<Com
         })
         .cloned();
     let Some(item) = item else {
-        ui.label("Select a container to view its logs, resources and configuration.");
+        select_workload(ui, pal);
         return None;
     };
     let mut command = None;
-    ui.horizontal_wrapped(|ui| {
-        forms::heading(ui, &item.name, 16.0);
-        ui.label(
-            RichText::new(item.service.as_deref().unwrap_or(&item.detail))
-                .small()
-                .color(pal.text_dim),
-        );
-        ui.label(RichText::new(&item.state).small().color(pal.text_dim));
-        for &action in item.actions() {
+    let focus_id = ui.scope_id().with("manager-detail-focus");
+    let mut back_to_list = false;
+    ui.add_space(8.0);
+    ui.horizontal_top(|ui| {
+        if compact {
+            let back = ui.add(forms::Btn::ghost("All containers").height(44.0));
             if ui
-                .add_enabled(
-                    browser.can_act(),
-                    forms::Btn::secondary(action.label()).small(),
-                )
-                .clicked()
+                .data_mut(|data| data.remove_temp::<bool>(focus_id))
+                .unwrap_or(false)
             {
-                command = Some(Command::Action(item.clone(), action));
+                back.request_focus();
+            }
+            if back.clicked() {
+                back_to_list = true;
+                return;
             }
         }
+        let actions_width = if item.actions().contains(&Action::Stop) {
+            168.0
+        } else if item.actions().is_empty() {
+            0.0
+        } else {
+            96.0
+        };
+        let name_width = (ui.available_width() - actions_width).max(96.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(name_width, 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_max_width(name_width);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&item.name)
+                            .family(crate::fonts::semibold())
+                            .size(16.0),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&item.name);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&item.detail)
+                            .monospace()
+                            .size(12.0)
+                            .color(pal.text_dim),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&item.detail);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(display_state(&item)).color(state_color(&item, pal)));
+                    if let Some((label, color)) = health(&item, pal) {
+                        ui.label(RichText::new(label).size(12.0).color(color));
+                    }
+                });
+            },
+        );
+        ui.add_enabled_ui(browser.can_act(), |ui| {
+            let mut requested = None;
+            for &action in item.actions() {
+                if matches!(action, Action::Stop | Action::Pause) {
+                    continue;
+                }
+                if ui
+                    .add(forms::Btn::ghost(action.label()).height(44.0))
+                    .clicked()
+                {
+                    requested = Some(action);
+                }
+            }
+            if item.actions().contains(&Action::Stop) {
+                egui::Popup::menu(&ui.add(forms::Btn::secondary("More").height(44.0))).show(|ui| {
+                    forms::menu_padding(ui);
+                    for &action in item
+                        .actions()
+                        .iter()
+                        .filter(|action| matches!(action, Action::Stop | Action::Pause))
+                    {
+                        let button = if action == Action::Stop {
+                            forms::Btn::danger(action.label())
+                        } else {
+                            forms::Btn::ghost(action.label())
+                        };
+                        if ui.add(button.height(44.0)).clicked() {
+                            requested = Some(action);
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            if let Some(action) = requested {
+                if matches!(action, Action::Stop | Action::Restart) {
+                    ui.data_mut(|data| data.insert_temp(confirmation_id, (item.key(), action)));
+                } else {
+                    command = Some(Command::Action(item.clone(), action));
+                }
+            }
+        });
     });
+    if back_to_list {
+        browser.manager.focus_details = false;
+        request_row_focus(ui, browser.manager.selected.as_deref());
+        return None;
+    }
     ui.add_space(4.0);
     let mut tab = browser.manager.tab;
     if forms::segmented_tabs(
@@ -504,7 +1020,24 @@ fn details(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<Com
     ) {
         browser.manager.choose_tab(tab);
     }
-    ui.add_space(4.0);
+    ui.separator();
+    let detail = if compact && ui.available_height() < 240.0 {
+        egui::ScrollArea::vertical()
+            .id_salt((
+                "compact-detail-output",
+                item.key(),
+                browser.manager.tab as u8,
+            ))
+            .show(ui, |ui| detail_body(ui, pal, browser, item))
+            .inner
+    } else {
+        detail_body(ui, pal, browser, item)
+    };
+    command.or(detail)
+}
+
+fn detail_body(ui: &mut Ui, pal: Palette, browser: &mut Browser, item: Item) -> Option<Command> {
+    let mut command = None;
     match browser.manager.tab {
         DetailTab::Logs => {
             ui.horizontal_wrapped(|ui| {
@@ -517,16 +1050,18 @@ fn details(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<Com
                     browser.manager.pause_logs = !browser.manager.pause_logs;
                     browser.manager.last_detail_poll = f64::NEG_INFINITY;
                 }
-                ui.label(if browser.manager.pause_logs {
-                    "Paused · last 300 lines"
+                let (text, color) = if browser.manager.pause_logs {
+                    ("Paused", pal.warning)
                 } else {
-                    "Refreshes every 2 seconds · last 300 lines"
-                });
+                    ("Live · every 2s", pal.success)
+                };
+                ui.label(RichText::new(text).size(12.0).color(color));
                 if let Some(at) = browser.manager.logs_updated {
                     ui.label(format!("Updated {}s ago", at.elapsed().as_secs()));
                 }
             });
             forms::Input::bare("Search log lines")
+                .height(44.0)
                 .hint("Search log lines")
                 .show(ui, &mut browser.manager.log_filter);
             let query = browser.manager.log_filter.to_lowercase();
@@ -538,7 +1073,7 @@ fn details(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<Com
                             // Leaves room for the well's own margin so the logs end inside the page.
                             egui::ScrollArea::both()
                                 .id_salt(("container-live-logs", item.key()))
-                                .max_height((ui.available_height() - 24.0).max(40.0))
+                                .max_height((ui.available_height() - 44.0).max(40.0))
                                 .auto_shrink([false, false])
                                 .stick_to_bottom(!browser.manager.pause_logs)
                                 .show(ui, |ui| {
@@ -559,9 +1094,24 @@ fn details(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<Com
                                     }
                                 });
                         });
+                    ui.label(
+                        RichText::new("Latest 300 lines")
+                            .size(12.0)
+                            .color(pal.text_dim),
+                    );
                 }
                 Some(Err(error)) => {
                     ui.colored_label(pal.danger, error);
+                    if ui
+                        .add_enabled(
+                            browser.manager.detail_pending.is_none(),
+                            forms::Btn::ghost("Retry logs").height(44.0),
+                        )
+                        .clicked()
+                    {
+                        browser.manager.pause_logs = false;
+                        browser.manager.invalidate_detail();
+                    }
                 }
                 None if browser.manager.pause_logs => {
                     ui.label("Logs paused. Resume to load log lines.");
@@ -584,6 +1134,12 @@ fn details(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<Com
             } else {
                 match &browser.manager.inspect {
                     Some(Ok(text)) => {
+                        if ui
+                            .add(forms::Btn::ghost("Copy JSON").height(44.0))
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(text.clone());
+                        }
                         egui::ScrollArea::both()
                             .id_salt(("container-inspect", item.key()))
                             .auto_shrink([false, false])
@@ -608,10 +1164,15 @@ fn details(ui: &mut egui::Ui, pal: Palette, browser: &mut Browser) -> Option<Com
             let samples = browser.manager.stats.get(&item.key());
             if let Some(samples) = samples.filter(|samples| !samples.is_empty()) {
                 let latest = &samples[samples.len() - 1];
-                ui.label(format!(
-                    "Sampled {}s ago · up to 60 samples · CPU can exceed 100% on multiple cores",
-                    latest.at.elapsed().as_secs()
-                ));
+                let age = latest.at.elapsed().as_secs();
+                ui.label(
+                    RichText::new(format!(
+                        "Sampled {age}s ago{}",
+                        if age > 15 { " · Stale" } else { "" }
+                    ))
+                    .color(if age > 15 { pal.warning } else { pal.text_dim }),
+                )
+                .on_hover_text("Up to 60 samples. CPU can exceed 100% on multiple cores.");
                 egui::ScrollArea::vertical()
                     .id_salt("container-resource-details")
                     .auto_shrink([false, false])
@@ -673,8 +1234,9 @@ fn port_view(
         return None;
     }
     let mut command = None;
+    forms::heading(ui, "Published ports", 16.0);
     ui.horizontal_wrapped(|ui| {
-        ui.label("Open as:");
+        ui.label("Open as");
         for (mode, label) in [
             (OpenAs::Http, "HTTP"),
             (OpenAs::Https, "HTTPS"),
@@ -693,7 +1255,11 @@ fn port_view(
             browser.manager.invalidate_detail();
         }
     });
-    ui.label("Uses a free local loopback port. Database and messaging presets use TCP. Stop closes connections.");
+    ui.label(
+        RichText::new("Forward through SSH to a free port on this computer.")
+            .size(12.0)
+            .color(pal.text_dim),
+    );
     egui::ScrollArea::vertical().id_salt("container-ports").auto_shrink([false, false]).show(ui, |ui| {
         match &browser.manager.ports {
             None => { ui.spinner(); ui.label("Loading published ports…"); }
@@ -703,14 +1269,16 @@ fn port_view(
                 for port in ports {
                     let key = port.key(&item.key());
                     ui.push_id(&key, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(format!("{} → {}/{}", std::net::SocketAddr::new(port.host, port.host_port), port.container_port, port.protocol));
-                            ui.label(format!("Preset: {}", crate::containers::services::detect(&item.detail, port.container_port).label()));
+                        super::glass::well_frame(ui.ctx(), 8).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.label(RichText::new("Remote binding → Container port").size(12.0).color(pal.text_dim));
+                            ui.label(RichText::new(format!("{} → {}/{}", std::net::SocketAddr::new(port.host, port.host_port), port.container_port, port.protocol)).monospace());
+                            let detected = crate::containers::services::detect(&item.detail, port.container_port);
+                            ui.label(RichText::new(detected.label()).size(12.0).color(pal.text_dim));
                             let status = browser.manager.tunnels.get(&key).map(|t| t.status());
                             let active = matches!(status, Some(TunnelStatus::Starting | TunnelStatus::Ready(_)));
-                            if ui.add_enabled(port.protocol == "tcp" && item.is_running() && !active, forms::Btn::secondary("Open locally").small())
+                            if ui.add_enabled(port.protocol == "tcp" && item.is_running() && !active, forms::Btn::primary("Open locally").height(44.0).painted())
                                 .on_disabled_hover_text(if port.protocol != "tcp" { "SSH forwards TCP ports only." } else if active { "Use the active tunnel below." } else { "Start the container first." }).clicked() {
-                                let detected = crate::containers::services::detect(&item.detail, port.container_port);
                                 let mode = if detected.mode() == OpenAs::Tcp { OpenAs::Tcp }
                                     else if browser.manager.port_mode == OpenAs::Http && matches!(port.container_port,443 | 8443) { OpenAs::Https }
                                     else { browser.manager.port_mode };
@@ -728,7 +1296,8 @@ fn port_view(
                 match tunnel.status() {
                     TunnelStatus::Starting => { ui.spinner(); ui.label("Checking the remote port and starting the tunnel…"); }
                     TunnelStatus::Ready(address) => {
-                        ui.label(format!("Ready · {address}"));
+                        ui.label(RichText::new("Tunnel ready · Local address").color(pal.success));
+                        ui.label(RichText::new(address.to_string()).monospace());
                         ui.horizontal_wrapped(|ui| {
                             if ui.add(forms::Btn::secondary("Copy address").small()).clicked() { ui.ctx().copy_text(address.to_string()); }
                             if let Some(url) = tunnel.mode.url(address) {
@@ -1025,7 +1594,8 @@ mod tests {
         let point = output
             .shapes
             .iter()
-            .find_map(|s| text_position(&s.shape, label))
+            .rev()
+            .find_map(|s| text_position(&s.shape, label).filter(|pos| s.clip_rect.contains(*pos)))
             .unwrap_or_else(|| panic!("Missing visible control: {label}"));
         render_with_presets(
             ctx,
@@ -1101,7 +1671,8 @@ mod tests {
         click(&ctx, &mut browser, size, "All volumes");
         let page = browser.manager.inventory.page(Kind::Volumes);
         assert_eq!(page.filter, "cache");
-        assert_eq!(page.selected, None);
+        assert_eq!(page.selected.as_deref(), Some("build-cache"));
+        assert!(!page.focus_details);
     }
 
     #[test]
@@ -1222,6 +1793,7 @@ mod tests {
         );
         let ctx = egui::Context::default();
         let size = Vec2::new(850.0, 440.0);
+        assert!(click(&ctx, &mut browser, size, "Import archive").is_none());
         click(&ctx, &mut browser, size, "e.g. app-data");
         render(
             &ctx,
@@ -1230,7 +1802,7 @@ mod tests {
             vec![Event::Text("restored-data".into())],
         );
         assert!(matches!(
-            click(&ctx, &mut browser, size, "Import archive"),
+            click(&ctx, &mut browser, size, "Choose archive"),
             Some(Command::ImportVolume(name)) if name == "restored-data"
         ));
     }
@@ -1424,6 +1996,21 @@ mod tests {
     }
 
     #[test]
+    fn library_group_header_collapses_only_its_workloads() {
+        let mut browser = fixture();
+        let ctx = egui::Context::default();
+        let size = Vec2::new(1400.0, 900.0);
+        click(&ctx, &mut browser, size, "Docker / shop");
+        let (closed, _) = render(&ctx, &mut browser, size, vec![]);
+        let text = rendered_text(&closed);
+        assert!(!text.lines().any(|line| line == "shop-api"));
+        assert!(text.lines().any(|line| line == "batch-worker"));
+        click(&ctx, &mut browser, size, "Docker / shop");
+        let (opened, _) = render(&ctx, &mut browser, size, vec![]);
+        assert!(rendered_text(&opened).lines().any(|line| line == "shop-api"));
+    }
+
+    #[test]
     fn paused_filter_keeps_only_paused_rows_and_offers_resume() {
         let mut browser = fixture();
         browser.listing.as_mut().unwrap().items.extend(
@@ -1436,6 +2023,7 @@ mod tests {
         );
         let ctx = egui::Context::default();
         let size = Vec2::new(1400.0, 900.0);
+        click(&ctx, &mut browser, size, "All states");
         click(&ctx, &mut browser, size, "Paused");
         let (output, _) = render(&ctx, &mut browser, size, vec![]);
         let text = rendered_text(&output);
@@ -1510,6 +2098,67 @@ mod tests {
             click(&ctx, &mut browser, size, "Open container terminal"),
             Some(Command::Terminal(_))
         ));
+    }
+
+    #[test]
+    fn stop_requires_confirmation_for_the_named_workload() {
+        let mut browser = fixture();
+        let ctx = egui::Context::default();
+        let size = Vec2::new(1200.0, 800.0);
+        click(&ctx, &mut browser, size, "shop-api");
+        click(&ctx, &mut browser, size, "More");
+        assert!(click(&ctx, &mut browser, size, "Stop").is_none());
+        render(&ctx, &mut browser, size, vec![]);
+        let (output, _) = render(&ctx, &mut browser, size, vec![]);
+        let text = rendered_text(&output);
+        assert!(text.contains("Stop shop-api?"), "{text}");
+        assert!(click(&ctx, &mut browser, size, "Cancel").is_none());
+        click(&ctx, &mut browser, size, "More");
+        assert!(click(&ctx, &mut browser, size, "Stop").is_none());
+        let Some(Command::Action(item, Action::Stop)) =
+            click(&ctx, &mut browser, size, "Stop container")
+        else {
+            panic!("Expected a confirmed stop command");
+        };
+        assert_eq!(item.scope, "abcdef123456");
+    }
+
+    #[test]
+    fn compact_ports_scroll_to_the_forwarding_action() {
+        let mut browser = fixture();
+        browser.manager.select("Docker/abcdef123456/shop-api".into());
+        browser.manager.choose_tab(DetailTab::Ports);
+        browser.manager.ports = Some(crate::containers::ports::parse(
+            r#"{"80/tcp":[{"HostIp":"127.0.0.1","HostPort":"8080"}]}"#,
+        ).map_err(|error| error.to_string()));
+        let ctx = egui::Context::default();
+        let size = Vec2::new(760.0, 320.0);
+        let (before, _) = render(&ctx, &mut browser, size, vec![]);
+        let visible = |output: &egui::FullOutput, label| {
+            output.shapes.iter().any(|shape| {
+                text_position(&shape.shape, label).is_some_and(|pos| shape.clip_rect.contains(pos))
+            })
+        };
+        assert!(!visible(&before, "Open locally"));
+        render(&ctx, &mut browser, size, vec![
+            Event::PointerMoved(Pos2::new(128.0, 280.0)),
+            Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Page,
+                delta: Vec2::new(0.0, -1.0),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        let (after, _) = render(&ctx, &mut browser, size, vec![]);
+        assert!(visible(&after, "All containers"));
+        let Some(Command::OpenPort(item, port, _)) =
+            click(&ctx, &mut browser, size, "Open locally")
+        else {
+            panic!("Expected to reach the forward action after scrolling");
+        };
+        assert_eq!(item.name, "shop-api");
+        assert_eq!(port.host_port, 8080);
     }
 
     #[test]

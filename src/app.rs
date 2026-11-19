@@ -817,10 +817,15 @@ impl App {
                 AppEvent::Containers {
                     tab,
                     session,
+                    runtime,
                     result,
                 } => {
                     if let Some(tt) = self.container_tab(tab, session) {
-                        tt.containers.apply_list(result);
+                        if let Some(runtime) = runtime {
+                            tt.containers.apply_runtime_list(runtime, result);
+                        } else {
+                            tt.containers.apply_list(result);
+                        }
                     }
                 }
                 AppEvent::ContainerInventory {

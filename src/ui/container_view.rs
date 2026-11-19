@@ -8,6 +8,7 @@ use crate::themes::Palette;
 
 pub enum Source<'a> {
     Ssh(&'a str),
+    Connecting(&'a str),
     Unsupported,
     Disconnected(&'a str),
 }
@@ -30,7 +31,7 @@ pub fn show(
     source: Source,
 ) -> Option<Command> {
     let host = match source {
-        Source::Ssh(host) => host,
+        Source::Ssh(host) | Source::Connecting(host) => host,
         Source::Unsupported => {
             dim(ui, pal, "Containers are available for SSH connections.");
             return None;

@@ -11,6 +11,7 @@ pub mod forms;
 pub mod glass;
 pub mod health_view;
 pub mod hosts;
+mod library_list;
 pub mod menus;
 pub mod motion;
 pub mod pages;

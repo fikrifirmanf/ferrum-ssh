@@ -65,6 +65,7 @@ pub struct Btn {
     height: f32,
     min_width: f32,
     full: bool,
+    painted: bool,
     color: Option<Color32>,
     a11y: Option<String>,
 }
@@ -77,6 +78,7 @@ impl Btn {
             height: tokens::CONTROL,
             min_width: 0.0,
             full: false,
+            painted: false,
             color: None,
             a11y: None,
         }
@@ -114,6 +116,11 @@ impl Btn {
     }
     pub fn full(mut self) -> Self {
         self.full = true;
+        self
+    }
+    /// Use inside an egui-painted surface that sits above the GPU control layer.
+    pub fn painted(mut self) -> Self {
+        self.painted = true;
         self
     }
     pub fn color(mut self, color: Color32) -> Self {
@@ -169,7 +176,13 @@ impl Widget for Btn {
             Kind::Ghost => None,
         };
         let face = match tier {
-            Some(tier) if enabled => glass::control(ui, rect, radius, tier, press),
+            Some(tier) if enabled && !self.painted => glass::control(ui, rect, radius, tier, press),
+            Some(tier) if enabled => {
+                let face = rect.expand(press * 2.5);
+                ui.painter()
+                    .extend(glass::fallback(face, face.height() / 2.0, tier, &look));
+                face
+            }
             Some(tier) => {
                 let shapes = glass::fallback(rect, radius, tier, &look)
                     .into_iter()
@@ -397,6 +410,7 @@ pub struct Input<'a> {
     icon: Option<&'a str>,
     suffix: Option<&'a str>,
     width: Option<f32>,
+    height: Option<f32>,
     salt: Option<&'a str>,
     mono: bool,
     password: bool,
@@ -447,6 +461,10 @@ impl<'a> Input<'a> {
         self.width = Some(width);
         self
     }
+    pub fn height(mut self, height: f32) -> Self {
+        self.height = Some(height);
+        self
+    }
     pub fn mono(mut self) -> Self {
         self.mono = true;
         self
@@ -479,7 +497,11 @@ impl<'a> Input<'a> {
         ));
         let name = self.label.or(self.salt).unwrap_or(self.hint).to_string();
         let bare = self.label.is_none() && self.help.is_none() && self.error.is_none();
-        let height = if bare { tokens::CONTROL } else { 0.0 };
+        let height = if bare {
+            self.height.unwrap_or(tokens::CONTROL)
+        } else {
+            0.0
+        };
         ui.allocate_ui_with_layout(vec2(width, height), Layout::top_down(Align::Min), |ui| {
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = 6.0;
@@ -506,7 +528,8 @@ impl<'a> Input<'a> {
         name: &str,
         pal: Palette,
     ) -> Response {
-        let (rect, _) = ui.allocate_exact_size(vec2(width, tokens::CONTROL), Sense::hover());
+        let height = self.height.unwrap_or(tokens::CONTROL);
+        let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
         let edit_id = id.with("edit");
         let enabled = ui.is_enabled();
         let focused = ui.memory(|m| m.has_focus(edit_id));
@@ -844,18 +867,78 @@ pub fn segmented<T: PartialEq + Clone>(
     value: &mut T,
     options: &[(T, &str)],
 ) -> bool {
-    segmented_sized(ui, salt, value, options, 28.0, 13.0, 14.0, false)
+    segmented_sized(ui, salt, value, options, 28.0, 13.0, 14.0)
 }
 
-/// [`segmented`] for switching views, such as detail tabs. Screen readers hear tabs in a
-/// tab list instead of a group of radio buttons.
+/// Underlined navigation tabs with named, keyboard-focusable targets.
 pub fn segmented_tabs<T: PartialEq + Clone>(
     ui: &mut Ui,
     salt: &str,
     value: &mut T,
     options: &[(T, &str)],
 ) -> bool {
-    segmented_sized(ui, salt, value, options, 28.0, 13.0, 14.0, true)
+    let pal = current(ui.ctx());
+    let font = egui::FontId::new(14.0, crate::fonts::medium());
+    let labels: Vec<_> = options
+        .iter()
+        .map(|(_, label)| {
+            ui.painter()
+                .layout_no_wrap((*label).into(), font.clone(), Color32::PLACEHOLDER)
+        })
+        .collect();
+    let width: f32 = labels
+        .iter()
+        .map(|label| (label.size().x + 24.0).max(44.0))
+        .sum();
+    let available = ui.available_width();
+    let (bar, _) = ui.allocate_exact_size(egui::vec2(available, 44.0), Sense::hover());
+    let tabs = ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(salt)
+            .max_rect(bar)
+            .accessibility_role(egui::Role::TabList),
+    );
+    let mut x = bar.left();
+    let mut changed = false;
+    for (index, ((option, label), galley)) in options.iter().zip(labels).enumerate() {
+        let w = (galley.size().x + 24.0).max(44.0) * (available / width).min(1.0);
+        let rect = egui::Rect::from_min_size(egui::pos2(x, bar.top()), egui::vec2(w, bar.height()));
+        x += w;
+        let response = tabs.interact(rect, tabs.scope_id().with(index), Sense::click());
+        let selected = option == value;
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::Role::Tab, ui.is_enabled(), selected, *label)
+        });
+        if response.hovered() {
+            tabs.painter().rect_filled(rect, 4.0, pal.card_hover);
+        }
+        let painter = tabs.painter().with_clip_rect(rect);
+        painter.galley(
+            rect.center() - galley.size() * 0.5,
+            galley,
+            if selected { pal.text } else { pal.text_dim },
+        );
+        if selected {
+            painter.hline(
+                rect.x_range(),
+                rect.bottom() - 1.0,
+                egui::Stroke::new(2.0, pal.accent),
+            );
+        }
+        if response.has_focus() {
+            painter.rect_stroke(
+                rect.shrink(1.0),
+                4.0,
+                egui::Stroke::new(2.0, pal.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if response.clicked() && !selected {
+            *value = option.clone();
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub fn segmented_tiny<T: PartialEq + Clone>(
@@ -864,7 +947,7 @@ pub fn segmented_tiny<T: PartialEq + Clone>(
     value: &mut T,
     options: &[(T, &str)],
 ) -> bool {
-    segmented_sized(ui, salt, value, options, 20.0, 12.0, 10.0, false)
+    segmented_sized(ui, salt, value, options, 20.0, 12.0, 10.0)
 }
 
 #[allow(clippy::too_many_arguments)] // private; the public wrappers fix the sizes
@@ -876,7 +959,6 @@ fn segmented_sized<T: PartialEq + Clone>(
     height: f32,
     text_size: f32,
     pad: f32,
-    tabs: bool,
 ) -> bool {
     let pal = current(ui.ctx());
     let id = ui.scope_id().with(("forge-seg", salt));
@@ -912,16 +994,11 @@ fn segmented_sized<T: PartialEq + Clone>(
     );
     glass::lens(ui, id.with("lens"), thumb, height / 2.0);
     // The segments sit in one group node, so a screen reader says "2 of 3".
-    let (group_role, segment_role) = if tabs {
-        (egui::Role::TabList, egui::Role::Tab)
-    } else {
-        (egui::Role::RadioGroup, egui::Role::RadioButton)
-    };
     let ui = &mut ui.new_child(
         egui::UiBuilder::new()
             .id_salt(("forge-seg-group", salt))
             .max_rect(rect)
-            .accessibility_role(group_role),
+            .accessibility_role(egui::Role::RadioGroup),
     );
     let mut changed = false;
     for (i, (option, text)) in options.iter().enumerate() {
@@ -931,7 +1008,9 @@ fn segmented_sized<T: PartialEq + Clone>(
         );
         let resp = ui.interact(cell_rect, id.with(i), Sense::click());
         let selected = option == value;
-        resp.widget_info(|| WidgetInfo::selected(segment_role, ui.is_enabled(), selected, *text));
+        resp.widget_info(|| {
+            WidgetInfo::selected(egui::Role::RadioButton, ui.is_enabled(), selected, *text)
+        });
         let warm = motion::ease(
             ui.ctx(),
             id.with((i, "ink")),

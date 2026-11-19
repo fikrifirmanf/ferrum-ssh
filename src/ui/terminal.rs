@@ -23,6 +23,7 @@ enum TermAction {
         tab: u64,
         session: u64,
         sudo: bool,
+        runtime: Option<crate::containers::Runtime>,
         client: std::sync::Arc<crate::conn::ssh::SshClient>,
     },
     ContainerInventory {
@@ -403,6 +404,7 @@ impl App {
                             tab: tab_id,
                             session: session.id,
                             sudo: tab.containers.use_sudo,
+                            runtime: tab.containers.retry_runtime.take(),
                             client,
                         });
                     }
@@ -656,7 +658,11 @@ impl App {
                             super::container_view::Source::Disconnected(&pane.session.target.label)
                         }
                         Some(pane) => {
-                            super::container_view::Source::Ssh(&pane.session.target.label)
+                            if *pane.session.status.lock() == Status::Connected {
+                                super::container_view::Source::Ssh(&pane.session.target.label)
+                            } else {
+                                super::container_view::Source::Connecting(&pane.session.target.label)
+                            }
                         }
                         None => super::container_view::Source::Unsupported,
                     };
@@ -1202,16 +1208,18 @@ impl App {
                     tab,
                     session,
                     sudo,
+                    runtime,
                     client,
                 } => {
                     let bridge = self.bridge.clone();
                     self.rt.spawn(async move {
-                        let result = crate::containers::list(&client, sudo)
+                        let result = crate::containers::list(&client, sudo, runtime)
                             .await
                             .map_err(|e| format!("{e:#}"));
                         bridge.send(AppEvent::Containers {
                             tab,
                             session,
+                            runtime,
                             result,
                         });
                     });

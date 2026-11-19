@@ -119,6 +119,7 @@ pub enum AppEvent {
     Containers {
         tab: u64,
         session: u64,
+        runtime: Option<crate::containers::Runtime>,
         result: Result<crate::containers::Listing, String>,
     },
     ContainerInventory {

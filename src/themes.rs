@@ -433,7 +433,7 @@ pub fn palette(theme: UiTheme, rgb: [u8; 3]) -> Palette {
         // Frost.
         UiTheme::Light => (
             0xffffff, 0xf2f1ef, 0xfaf9f8, 0xebeae7, 0xdcd9d3, 0x1a1a1c, 0x5d5d65, 0x6b6b73,
-            0x8a867d, 0x17683f, 0x765500, 0xc93a3e, 0x2f64b5, 0xf6f5f3,
+            0x8a867d, 0x17683f, 0x765500, 0xb63236, 0x2f64b5, 0xf6f5f3,
         ),
     };
     // The three named accents have tuned tones per theme; anything else adapts below.

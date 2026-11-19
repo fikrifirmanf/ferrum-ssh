@@ -375,48 +375,15 @@ impl App {
         let id = egui::Id::unique(("library-header", section.group));
         let (rect, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::hover());
-        let resp = ui.interact(rect, id, Sense::click());
-        resp.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::Role::Button, true, section.name.as_str())
-        });
-        let ctx = ui.ctx();
-        let hover = motion::ease(ctx, id.with("h"), resp.hovered(), motion::FAST);
-        let open = motion::ease_panel(ctx, id.with("turn"), !closed);
-        let p = ui.painter();
-        p.rect_filled(rect, 8, super::glass::hover_wash(ui).gamma_multiply(hover));
-        let ink = pal.text_dim.lerp_to_gamma(pal.text, hover);
-        forms::chevron(
+        let resp = super::library_list::group_header(
             ui,
-            rect.left_center() + Vec2::new(14.0, 0.0),
-            std::f32::consts::FRAC_PI_2 * open,
-            ink,
+            rect,
+            id,
+            &section.name,
+            section.hosts.len(),
+            closed,
+            pal,
         );
-        let name = p.layout_no_wrap(
-            section.name.clone(),
-            egui::FontId::new(12.0, crate::fonts::medium()),
-            ink,
-        );
-        let name_width = name.size().x;
-        p.galley(
-            egui::pos2(rect.left() + 26.0, rect.center().y - name.size().y / 2.0),
-            name,
-            ink,
-        );
-        p.text(
-            egui::pos2(rect.left() + 34.0 + name_width, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            section.hosts.len().to_string(),
-            egui::FontId::monospace(12.0),
-            pal.faint,
-        );
-        if resp.has_focus() {
-            p.rect_stroke(
-                rect.shrink(1.0),
-                6,
-                Stroke::new(2.0, pal.accent),
-                egui::StrokeKind::Inside,
-            );
-        }
         if let Some(group) = section.group {
             if resp.dnd_hover_payload::<Uuid>().is_some() {
                 ui.painter().rect_stroke(
@@ -619,50 +586,18 @@ impl App {
         });
         let selected = Some(h.id) == self.inspected_host || self.selected_hosts.contains(&h.id);
         if ui.is_rect_visible(rect) {
-            let ctx = ui.ctx();
-            let hover = motion::ease(ctx, id.with("h"), response.hovered(), motion::FAST);
-            let warm = motion::ease(ctx, id.with("warm"), selected, motion::FAST);
-            let marker = motion::ease(ctx, id.with("mark"), selected, motion::CONTROL);
+            let warm = super::library_list::row_surface(ui, &response, selected, pal);
             let compact = rect.height() < (tokens::ROW + tokens::COMPACT_ROW) / 2.0;
             let wide = rect.width() > 760.0;
             let p = ui.painter();
-            p.rect_filled(rect, 10, super::glass::hover_wash(ui).gamma_multiply(hover));
-            p.rect_filled(
+            let icon_rect = super::library_list::icon_tile(
+                ui,
                 rect,
-                10,
-                super::glass::selection_fill(ui).gamma_multiply(warm),
-            );
-            if marker > 0.0 {
-                let half = (rect.height() / 2.0 - 10.0) * marker;
-                p.vline(
-                    rect.left() + 1.0,
-                    (rect.center().y - half)..=(rect.center().y + half),
-                    Stroke::new(2.0, pal.accent),
-                );
-            }
-            if response.has_focus() {
-                p.rect_stroke(
-                    rect.shrink(1.0),
-                    8,
-                    Stroke::new(2.0, pal.accent),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            let icon_size = if compact { 28.0 } else { 32.0 };
-            let icon_rect = egui::Rect::from_center_size(
-                egui::pos2(rect.left() + 12.0 + icon_size / 2.0, rect.center().y),
-                Vec2::splat(icon_size),
-            );
-            p.rect_filled(icon_rect, 8, super::glass::hover_wash(ui));
-            p.text(
-                icon_rect.center(),
-                egui::Align2::CENTER_CENTER,
                 if h.protocol == Protocol::Serial {
                     crate::icons::USB
                 } else {
                     crate::icons::HARD_DRIVES
                 },
-                egui::FontId::proportional(16.0),
                 pal.text_dim.lerp_to_gamma(pal.accent, warm),
             );
             if connected.contains(&h.id) {

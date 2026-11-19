@@ -13,18 +13,18 @@ pub fn show(ui: &mut egui::Ui, pal: Palette, volume: &str, view: &mut View) -> O
         return editor(ui, pal, volume, view);
     }
     let mut export = false;
-    let mut up = false;
+    let mut parent_depth = None;
     let mut reload = false;
     ui.horizontal_wrapped(|ui| {
         forms::heading(ui, volume, 16.0);
         if ui
-            .add(forms::Btn::secondary("Volume details").small())
+            .add(forms::Btn::ghost("Volume details").height(44.0))
             .clicked()
         {
             view.close();
         }
         export = ui
-            .add(forms::Btn::secondary("Export volume").small())
+            .add(forms::Btn::secondary("Export volume").height(44.0))
             .on_hover_text("Save the entire volume as a tar archive")
             .clicked();
     });
@@ -32,34 +32,31 @@ pub fn show(ui: &mut egui::Ui, pal: Palette, volume: &str, view: &mut View) -> O
         return None;
     }
     ui.horizontal_wrapped(|ui| {
-        up = ui
-            .add_enabled(
-                !view.directory.is_empty(),
-                forms::Btn::secondary("Parent folder").small(),
-            )
-            .clicked();
+        if view.directory.is_empty() {
+            ui.label(RichText::new("/").monospace().color(pal.text_dim));
+        } else {
+            if ui.add(forms::Btn::ghost("Root").height(44.0)).clicked() {
+                parent_depth = Some(0);
+            }
+            for (depth, component) in view.directory.iter().enumerate() {
+                ui.label(RichText::new("/").color(pal.text_dim));
+                let name = display_name(component);
+                if depth + 1 == view.directory.len() {
+                    ui.label(RichText::new(name).monospace());
+                } else if ui.add(forms::Btn::ghost(name).height(44.0)).clicked() {
+                    parent_depth = Some(depth + 1);
+                }
+            }
+        }
         reload = ui
             .add_enabled(
                 !view.pending,
-                forms::Btn::secondary("Refresh files").small(),
+                forms::Btn::secondary("Refresh files").height(44.0),
             )
             .clicked();
-        let path = view
-            .directory
-            .iter()
-            .map(|name| display_name(name))
-            .collect::<Vec<_>>()
-            .join("/");
-        ui.label(
-            RichText::new(format!("/{path}"))
-                .monospace()
-                .color(pal.text_dim),
-        );
     });
-    if up {
-        let mut parent = view.directory.clone();
-        parent.pop();
-        view.navigate(parent);
+    if let Some(depth) = parent_depth {
+        view.navigate(view.directory[..depth].to_vec());
     } else if reload {
         view.navigate(view.directory.clone());
     }
@@ -100,12 +97,24 @@ pub fn show(ui: &mut egui::Ui, pal: Palette, volume: &str, view: &mut View) -> O
                     header.col(|_| {});
                 })
                 .body(|body| {
-                    body.rows(28.0, entries.len(), |mut row| {
+                    body.rows(44.0, entries.len(), |mut row| {
                         let entry = &entries[row.index()];
                         row.col(|ui| {
                             let name = display_name(&entry.name);
-                            ui.add(egui::Label::new(&name).selectable(false).truncate())
-                                .on_hover_text(name);
+                            if entry.kind == Kind::Directory {
+                                ui.push_id(&entry.name, |ui| {
+                                    if super::container_manager::row_label(
+                                        ui, &name, None, false, pal,
+                                    )
+                                    .clicked()
+                                    {
+                                        folder = Some(entry.name.clone());
+                                    }
+                                });
+                            } else {
+                                ui.add(egui::Label::new(&name).selectable(false).truncate())
+                                    .on_hover_text(name);
+                            }
                         });
                         let (kind, size) = match entry.kind {
                             Kind::Directory => ("Folder", None),
@@ -124,7 +133,9 @@ pub fn show(ui: &mut egui::Ui, pal: Palette, volume: &str, view: &mut View) -> O
                         row.col(|ui| {
                             if let Kind::File(size) = entry.kind
                                 && size <= EDIT_LIMIT
-                                && ui.add(forms::Btn::secondary("Edit text").small()).clicked()
+                                && ui
+                                    .add(forms::Btn::secondary("Edit text").height(44.0))
+                                    .clicked()
                             {
                                 open = Some(entry.name.clone());
                             }
@@ -187,7 +198,7 @@ fn editor(ui: &mut egui::Ui, pal: Palette, volume: &str, view: &mut View) -> Opt
         save = ui
             .add_enabled(
                 !editor.pending && !read_only && editor.original.is_some() && editor.dirty,
-                forms::Btn::primary("Save file").small(),
+                forms::Btn::primary("Save file").height(44.0),
             )
             .clicked();
         if editor.pending {

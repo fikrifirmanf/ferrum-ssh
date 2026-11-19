@@ -241,6 +241,8 @@ pub async fn run(client: &SshClient, request: &Request, sudo: bool) -> Result<Re
 pub struct Page {
     pub listing: Option<Result<Vec<Entry>, String>>,
     pub selected: Option<String>,
+    pub focus_details: bool,
+    pub build_metadata: bool,
     pub detail: Option<Result<Detail, String>>,
     pub pending: bool,
     pub notice: Option<Result<String, String>>,
@@ -252,14 +254,18 @@ pub struct Page {
 
 impl Page {
     pub fn select(&mut self, id: &str) {
+        self.focus_details = true;
         if self.selected.as_deref() != Some(id) {
             self.selected = Some(id.to_owned());
+            self.build_metadata = false;
+            self.log_filter.clear();
             self.detail = None;
             self.files.close();
         }
     }
 
     pub fn clear_selection(&mut self) {
+        self.focus_details = false;
         self.selected = None;
         self.detail = None;
         self.files.close();

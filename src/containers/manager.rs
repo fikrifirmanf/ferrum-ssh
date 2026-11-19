@@ -1,5 +1,5 @@
 //! Read-only container details and bounded resource samples over SSH.
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -51,6 +51,7 @@ pub struct Manager {
     pub unified_logs: super::unified_logs::View,
     pub selected: Option<String>,
     pub focus_details: bool,
+    pub collapsed_groups: BTreeSet<String>,
     pub tab: DetailTab,
     pub logs: Option<Result<String, String>>,
     pub inspect: Option<Result<String, String>>,
@@ -79,6 +80,7 @@ impl Default for Manager {
             unified_logs: Default::default(),
             selected: None,
             focus_details: false,
+            collapsed_groups: BTreeSet::new(),
             tab: DetailTab::Logs,
             logs: None,
             inspect: None,

@@ -1,8 +1,7 @@
 //! Docker images, volumes and build history inside the SSH container manager.
 use egui::{RichText, Sense};
-use egui_extras::{Column, TableBuilder};
 
-use super::forms;
+use super::{container_manager, forms, library_list};
 use crate::{
     containers::{
         inventory::{Build, Detail, Entry, Kind, Page, Request},
@@ -29,6 +28,7 @@ pub fn show(
     kind: Kind,
     page: &mut Page,
     sudo: &mut bool,
+    host: &str,
 ) -> Option<Action> {
     if kind == Kind::Volumes
         && page.files.open
@@ -36,18 +36,144 @@ pub fn show(
     {
         return super::container_volume_files::show(ui, pal, name, &mut page.files);
     }
+    let compact = container_manager::compact_workspace(ui);
+    let focus_id = ui.scope_id().with(("inventory-focus", kind));
+    if compact && page.focus_details && page.selected.is_some() {
+        let back = match kind {
+            Kind::Images => "All images",
+            Kind::Volumes => "All volumes",
+            Kind::Builds => "All builds",
+        };
+        let button = ui.add(forms::Btn::ghost(back).height(44.0));
+        if ui
+            .data_mut(|data| data.remove_temp::<bool>(focus_id.with("details")))
+            .unwrap_or(false)
+        {
+            button.request_focus();
+        }
+        if button.clicked() {
+            page.focus_details = false;
+            ui.data_mut(|data| {
+                data.insert_temp(focus_id, page.selected.clone().unwrap_or_default())
+            });
+            return None;
+        }
+        return details(ui, pal, kind, page).map(Action::Inventory);
+    }
+    if compact || !matches!(&page.listing, Some(Ok(entries)) if !entries.is_empty()) {
+        let result = list(ui, pal, kind, page, sudo, host, focus_id);
+        if result.is_none()
+            && page.focus_details
+            && page.selected.is_some()
+            && page.detail.is_none()
+            && !page.pending
+        {
+            return page
+                .selected
+                .clone()
+                .map(|id| Action::Inventory(Request::Inspect(kind, id)));
+        }
+        result
+    } else {
+        let (mut list_ui, mut inspector) = container_manager::split_workspace(ui, pal, 0.38, 340.0);
+        let action = list(&mut list_ui, pal, kind, page, sudo, host, focus_id);
+        let detail = details(&mut inspector, pal, kind, page).map(Action::Inventory);
+        action.or(detail)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Mutation {
+    Pull,
+    Create,
+    Import,
+}
+
+impl Mutation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pull => "Pull image",
+            Self::Create => "Create volume",
+            Self::Import => "Import archive",
+        }
+    }
+}
+
+fn mutation_form(
+    ui: &mut egui::Ui,
+    pal: Palette,
+    page: &mut Page,
+    host: &str,
+    id: egui::Id,
+) -> Option<Action> {
+    let intent = ui.data(|data| data.get_temp::<Mutation>(id))?;
+    let modal = egui::Modal::new(id)
+        .backdrop_color(pal.scrim)
+        .show(ui.ctx(), |ui| {
+            ui.set_width(360.0);
+            forms::heading(ui, intent.label(), 16.0);
+            ui.label(RichText::new(host).monospace().color(pal.text_dim));
+            let (name, hint) = match intent {
+                Mutation::Pull => ("Image reference", "e.g. redis:7"),
+                _ => ("Volume name", "e.g. app-data"),
+            };
+            if matches!(intent, Mutation::Import) {
+                ui.label("Restore a tar archive into a new volume.");
+            }
+            forms::Input::new(name).hint(hint).show(ui, &mut page.input);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let submit_label = if matches!(intent, Mutation::Import) {
+                    "Choose archive"
+                } else {
+                    intent.label()
+                };
+                let cancel = ui.add(forms::Btn::ghost("Cancel").height(44.0)).clicked();
+                let submit = ui
+                    .add_enabled(
+                        !page.pending && !page.input.trim().is_empty(),
+                        forms::Btn::primary(submit_label).height(44.0),
+                    )
+                    .clicked();
+                (cancel, submit)
+            })
+            .inner
+        });
+    let (cancel, submit) = modal.inner;
+    if cancel || submit || modal.should_close() {
+        ui.data_mut(|data| data.remove::<Mutation>(id));
+    }
+    submit.then(|| {
+        let value = page.input.trim().to_owned();
+        match intent {
+            Mutation::Pull => Action::Inventory(Request::Pull(value)),
+            Mutation::Create => Action::Inventory(Request::CreateVolume(value)),
+            Mutation::Import => Action::ImportVolume(value),
+        }
+    })
+}
+
+fn list(
+    ui: &mut egui::Ui,
+    pal: Palette,
+    kind: Kind,
+    page: &mut Page,
+    sudo: &mut bool,
+    host: &str,
+    focus_id: egui::Id,
+) -> Option<Action> {
     let (search, loading, empty, mutation) = match kind {
         Kind::Images => (
             "Search images",
             "Loading images…",
             "No images on this host.",
-            Some(("Image reference", "e.g. redis:7", "Pull image")),
+            Some(Mutation::Pull),
         ),
         Kind::Volumes => (
             "Search volumes",
             "Loading volumes…",
             "No volumes on this host.",
-            Some(("Volume name", "e.g. app-data", "Create volume")),
+            Some(Mutation::Create),
         ),
         Kind::Builds => (
             "Search builds",
@@ -56,74 +182,54 @@ pub fn show(
             None,
         ),
     };
-    if ui.available_height() < 425.0 && page.selected.is_some() {
-        let back = match kind {
-            Kind::Images => "All images",
-            Kind::Volumes => "All volumes",
-            Kind::Builds => "All builds",
-        };
-        if ui.add(forms::Btn::secondary(back).small()).clicked() {
-            page.clear_selection();
-            return None;
-        }
-        return details(ui, pal, kind, page).map(Action::Inventory);
+    let modal_id = focus_id.with("mutation");
+    if let Some(action) = mutation_form(ui, pal, page, host, modal_id) {
+        return Some(action);
     }
     let mut request = None;
-    let mut import = None;
+    let has_entries = matches!(&page.listing, Some(Ok(entries)) if !entries.is_empty());
     ui.horizontal_wrapped(|ui| {
-        forms::Input::bare(search)
-            .hint(search)
-            .icon(crate::icons::MAGNIFYING_GLASS)
-            .width(240.0)
-            .show(ui, &mut page.filter);
-        if ui
-            .add_enabled(!page.pending, forms::Btn::secondary("Refresh").small())
-            .clicked()
-        {
-            request = Some(Request::List(kind));
+        if has_entries {
+            forms::Input::bare(search)
+                .height(44.0)
+                .hint(search)
+                .icon(crate::icons::MAGNIFYING_GLASS)
+                .width((ui.available_width() * 0.45).clamp(140.0, 240.0))
+                .show(ui, &mut page.filter);
+        }
+        if mutation.is_none() || !matches!(&page.listing, Some(Ok(entries)) if entries.is_empty()) {
+            if ui
+                .add_enabled(!page.pending, forms::Btn::secondary("Refresh").height(44.0))
+                .clicked()
+            {
+                request = Some(Request::List(kind));
+            }
+        }
+        if let Some(mutation) = mutation {
+            if ui
+                .add_enabled(
+                    !page.pending,
+                    forms::Btn::primary(mutation.label()).height(44.0),
+                )
+                .clicked()
+            {
+                ui.data_mut(|data| data.insert_temp(modal_id, mutation));
+            }
+            if kind == Kind::Volumes
+                && ui
+                    .add_enabled(
+                        !page.pending,
+                        forms::Btn::secondary("Import archive").height(44.0),
+                    )
+                    .clicked()
+            {
+                ui.data_mut(|data| data.insert_temp(modal_id, Mutation::Import));
+            }
         }
         if page.pending {
             ui.spinner();
         }
     });
-    if let Some((input, hint, save)) = mutation {
-        ui.horizontal_wrapped(|ui| {
-            ui.add_enabled_ui(!page.pending, |ui| {
-                forms::Input::bare(input)
-                    .hint(hint)
-                    .width(240.0)
-                    .show(ui, &mut page.input);
-                if ui
-                    .add_enabled(
-                        !page.input.trim().is_empty(),
-                        forms::Btn::secondary(save).small(),
-                    )
-                    .clicked()
-                {
-                    let value = page.input.trim().to_owned();
-                    request = Some(if kind == Kind::Images {
-                        Request::Pull(value)
-                    } else {
-                        Request::CreateVolume(value)
-                    });
-                }
-                if kind == Kind::Volumes
-                    && ui
-                        .add_enabled(
-                            !page.input.trim().is_empty(),
-                            forms::Btn::secondary("Import archive").small(),
-                        )
-                        .on_hover_text("Restore an archive into a new volume with this name")
-                        .clicked()
-                {
-                    import = Some(Action::ImportVolume(page.input.trim().to_owned()));
-                }
-            });
-        });
-    }
-    if import.is_some() {
-        return import;
-    }
     if let Some(notice) = &page.notice {
         match notice {
             Ok(message) => {
@@ -187,102 +293,164 @@ pub fn show(
                     page.filter.clear();
                 }
             } else {
-                let height = ui.available_height();
-                let max_height = if page.selected.is_some() {
-                    height * 0.45
-                } else {
-                    height - 32.0
-                };
+                let restore = ui.data_mut(|data| data.remove_temp::<String>(focus_id));
                 let mut selected = None;
-                ui.visuals_mut().selection.bg_fill = super::glass::selection_fill(ui);
-                ui.visuals_mut().widgets.hovered.weak_bg_fill = super::glass::hover_wash(ui);
-                let (secondary, trailing) = if kind == Kind::Builds {
-                    (Column::exact(100.0), Column::exact(146.0))
+                let row_height = if ui.available_height() < 430.0 {
+                    crate::themes::tokens::COMPACT_ROW
                 } else {
-                    (
-                        Column::remainder().at_least(70.0),
-                        Column::auto().at_least(60.0),
-                    )
+                    crate::themes::tokens::ROW
                 };
-                TableBuilder::new(ui)
-                    .id_salt(kind)
-                    .sense(Sense::click())
-                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .max_scroll_height(max_height.max(64.0))
-                    .column(Column::remainder().at_least(90.0).clip(true))
-                    .column(secondary.clip(true))
-                    .column(trailing.clip(true))
-                    .header(28.0, |mut header| {
-                        let columns = match kind {
-                            Kind::Images => ["Image", "ID", "Size"],
-                            Kind::Volumes => ["Volume", "Driver", "Scope"],
-                            Kind::Builds => ["Build", "Status", "Started (UTC)"],
+                let labels = match kind {
+                    Kind::Images => ["Image / ID", "", "Size"],
+                    Kind::Volumes => ["Volume / driver", "", "Scope"],
+                    Kind::Builds => ["Build / reference", "Status", "Started (UTC)"],
+                };
+                let (header, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::hover());
+                let [identity, state, trailing] = inventory_columns(header, kind);
+                let identity = egui::Rect::from_min_max(
+                    identity.min + egui::vec2(if row_height < 50.0 { 52.0 } else { 56.0 }, 0.0),
+                    identity.max,
+                );
+                for (index, (cell, label)) in [identity, state, trailing]
+                    .into_iter()
+                    .zip(labels)
+                    .enumerate()
+                {
+                    if !label.is_empty() {
+                        library_list::text(
+                            ui,
+                            cell,
+                            label,
+                            egui::FontId::new(12.0, crate::fonts::medium()),
+                            pal.text_dim,
+                            index == 2,
+                        );
+                    }
+                }
+                ui.painter().hline(
+                    (header.left() + 12.0)..=(header.right() - 12.0),
+                    header.bottom(),
+                    egui::Stroke::new(1.0, pal.border),
+                );
+                let mut scroll = egui::ScrollArea::vertical()
+                    .id_salt(("inventory", kind))
+                    .auto_shrink([false, false]);
+                if let Some(index) = restore
+                    .as_deref()
+                    .and_then(|id| rows.iter().position(|entry| entry.id() == id))
+                {
+                    scroll = scroll.vertical_scroll_offset(
+                        index as f32 * (row_height + ui.spacing().item_spacing.y),
+                    );
+                }
+                scroll.show_rows(ui, row_height, rows.len(), |ui, range| {
+                    let scope = ui.scope_id();
+                    for entry in &rows[range] {
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(header.width(), row_height),
+                            Sense::hover(),
+                        );
+                        let icon = match kind {
+                            Kind::Images => crate::icons::PACKAGE,
+                            Kind::Volumes => crate::icons::HARD_DRIVES,
+                            Kind::Builds => crate::icons::TERMINAL_WINDOW,
                         };
-                        for label in columns {
-                            header.col(|ui| {
-                                ui.label(RichText::new(label).color(pal.text_dim));
-                            });
+                        let (name, subtitle, status, value) = match entry {
+                            Entry::Image(image) => (
+                                image.reference().unwrap_or_else(|| "<untagged>".into()),
+                                image.id.as_str(),
+                                "",
+                                image.size.clone(),
+                            ),
+                            Entry::Volume(volume) => (
+                                volume.name.clone(),
+                                volume.driver.as_str(),
+                                "",
+                                volume.scope.clone(),
+                            ),
+                            Entry::Build(build) => (
+                                build_name(build).to_owned(),
+                                build.reference.as_str(),
+                                build.status.as_str(),
+                                build.created_at.format("%Y-%m-%d %H:%M").to_string(),
+                            ),
+                        };
+                        let response = library_list::resource_row(
+                            ui,
+                            rect,
+                            scope.with(entry.id()),
+                            icon,
+                            (&name, subtitle),
+                            page.selected.as_deref() == Some(entry.id()),
+                            pal,
+                        );
+                        if restore.as_deref() == Some(entry.id()) {
+                            response.request_focus();
                         }
-                    })
-                    .body(|body| {
-                        body.rows(28.0, rows.len(), |mut row| {
-                            let entry = rows[row.index()];
-                            row.set_selected(page.selected.as_deref() == Some(entry.id()));
-                            let (name, secondary, trailing) = match entry {
-                                Entry::Image(image) => (
-                                    image.reference().unwrap_or_else(|| "<untagged>".into()),
-                                    image.id.clone(),
-                                    image.size.clone(),
-                                ),
-                                Entry::Volume(volume) => (
-                                    volume.name.clone(),
-                                    volume.driver.clone(),
-                                    volume.scope.clone(),
-                                ),
-                                Entry::Build(build) => (
-                                    build_name(build).to_owned(),
-                                    build.status.clone(),
-                                    build.created_at.format("%Y-%m-%d %H:%M").to_string(),
-                                ),
+                        if response.clicked() {
+                            selected = Some(entry.id().to_owned());
+                        }
+                        let [identity, state, trailing] = inventory_columns(rect, kind);
+                        library_list::identity(ui, identity, &name, subtitle, pal);
+                        if !status.is_empty() {
+                            let color = match status {
+                                "Error" | "Failed" => pal.danger,
+                                "Completed" | "Succeeded" => pal.success,
+                                _ => pal.text_dim,
                             };
-                            for (column, label) in [name.as_str(), &secondary, &trailing]
-                                .into_iter()
-                                .enumerate()
-                            {
-                                row.col(|ui| {
-                                    let color = if column == 1
-                                        && kind == Kind::Builds
-                                        && matches!(label, "Error" | "Failed")
-                                    {
-                                        pal.danger
-                                    } else {
-                                        pal.text
-                                    };
-                                    ui.add(
-                                        egui::Label::new(RichText::new(label).color(color))
-                                            .truncate()
-                                            .selectable(false),
-                                    )
-                                    .on_hover_text(label);
-                                });
-                            }
-                            if row.response().clicked() {
-                                selected = Some(entry.id().to_owned());
-                            }
-                        })
-                    });
+                            library_list::text(
+                                ui,
+                                state,
+                                status,
+                                egui::FontId::proportional(13.0),
+                                color,
+                                false,
+                            );
+                        }
+                        library_list::text(
+                            ui,
+                            trailing,
+                            &value,
+                            egui::FontId::monospace(12.0),
+                            pal.text_dim,
+                            true,
+                        );
+                    }
+                });
                 if let Some(id) = selected {
                     page.select(&id);
+                    ui.data_mut(|data| data.insert_temp(focus_id.with("details"), true));
                 }
             }
         }
     }
-    if page.selected.is_some() {
-        ui.separator();
-        let detail_request = details(ui, pal, kind, page);
-        request = request.or(detail_request);
-    }
     request.map(Action::Inventory)
+}
+
+fn inventory_columns(rect: egui::Rect, kind: Kind) -> [egui::Rect; 3] {
+    let right = rect.right() - 12.0;
+    let end = if kind == Kind::Builds {
+        right - 136.0
+    } else {
+        right - 92.0
+    };
+    let state = if kind == Kind::Builds {
+        end - 92.0
+    } else {
+        end
+    };
+    let cell = |left, right| {
+        egui::Rect::from_min_max(
+            egui::pos2(left, rect.top()),
+            egui::pos2(right, rect.bottom()),
+        )
+    };
+    [
+        cell(rect.left(), state - 12.0),
+        cell(state, end - 8.0),
+        cell(end, right),
+    ]
 }
 
 fn build_name(build: &Build) -> &str {
@@ -298,18 +466,29 @@ fn build_name(build: &Build) -> &str {
 }
 
 fn details(ui: &mut egui::Ui, pal: Palette, kind: Kind, page: &mut Page) -> Option<Request> {
-    let id = page.selected.as_deref()?;
+    ui.add_space(8.0);
+    let Some(id) = page.selected.as_deref() else {
+        let resource = match kind {
+            Kind::Images => "an image",
+            Kind::Volumes => "a volume",
+            Kind::Builds => "a build",
+        };
+        forms::heading(ui, &format!("Select {resource}"), 16.0);
+        ui.label(RichText::new("Choose a row to see its details.").color(pal.text_dim));
+        return None;
+    };
+    let entry = match &page.listing {
+        Some(Ok(entries)) => entries.iter().find(|entry| entry.id() == id),
+        _ => None,
+    };
+    let name = match entry {
+        Some(Entry::Image(image)) => image.reference().unwrap_or_else(|| "<untagged>".into()),
+        Some(Entry::Build(build)) => build_name(build).to_owned(),
+        _ => id.to_owned(),
+    };
+    forms::heading(ui, &name, 16.0);
     let mut request = None;
     ui.horizontal_wrapped(|ui| {
-        forms::heading(
-            ui,
-            if kind == Kind::Builds {
-                "Build log"
-            } else {
-                "Metadata"
-            },
-            16.0,
-        );
         let copy = match kind {
             Kind::Images => "Copy image ID",
             Kind::Volumes => "Copy volume name",
@@ -318,14 +497,21 @@ fn details(ui: &mut egui::Ui, pal: Palette, kind: Kind, page: &mut Page) -> Opti
         if ui.add(forms::Btn::secondary(copy).small()).clicked() {
             ui.ctx().copy_text(id.to_owned());
         }
-        if kind == Kind::Volumes && ui.add(forms::Btn::secondary("Browse files").small()).clicked() {
+        if kind == Kind::Volumes
+            && ui
+                .add(forms::Btn::primary("Browse files").height(44.0))
+                .clicked()
+        {
             page.files.open = true;
         }
     });
-    if kind == Kind::Builds
-        && let Some(Ok(entries)) = &page.listing
-        && let Some(Entry::Build(build)) = entries.iter().find(|entry| entry.id() == id)
-    {
+    if let Some(Entry::Build(build)) = entry {
+        forms::segmented_tabs(
+            ui,
+            "build-detail",
+            &mut page.build_metadata,
+            &[(false, "Build log"), (true, "Inspect")],
+        );
         ui.horizontal_wrapped(|ui| {
             ui.label(build_name(build));
             ui.label(&build.status);
@@ -343,6 +529,11 @@ fn details(ui: &mut egui::Ui, pal: Palette, kind: Kind, page: &mut Page) -> Opti
             }
         });
     }
+    if kind == Kind::Builds && page.build_metadata {
+        ui.label(RichText::new(id).monospace().size(12.0).color(pal.text_dim))
+            .on_hover_text(id);
+        return None;
+    }
     match &page.detail {
         Some(Ok(Detail::Metadata(value))) => {
             let metadata = serde_json::to_string_pretty(value).unwrap_or_default();
@@ -354,6 +545,7 @@ fn details(ui: &mut egui::Ui, pal: Palette, kind: Kind, page: &mut Page) -> Opti
         Some(Ok(Detail::BuildLog(log))) => {
             ui.horizontal_wrapped(|ui| {
                 forms::Input::bare("Search build log")
+                    .height(44.0)
                     .hint("Search build log")
                     .width(240.0)
                     .show(ui, &mut page.log_filter);
