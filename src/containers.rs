@@ -5,9 +5,13 @@
 //! (`--format '{{json .}}'`); `kubectl get pods` is read as whitespace-separated columns.
 //! Names and ids are validated before they are put into a command line.
 
+pub mod inventory;
 pub mod manager;
 pub mod ports;
 pub mod services;
+pub mod unified_logs;
+pub mod volume_files;
+pub mod volume_import;
 
 use std::time::Duration;
 
@@ -103,6 +107,31 @@ impl Item {
         }
     }
 
+    fn is_paused(&self) -> bool {
+        self.runtime != Runtime::Kubernetes && self.state == "paused"
+    }
+
+    fn can_start(&self) -> bool {
+        self.runtime != Runtime::Kubernetes
+            && matches!(
+                self.state.as_str(),
+                "configured" | "created" | "exited" | "initialized" | "stopped"
+            )
+    }
+
+    pub fn actions(&self) -> &'static [Action] {
+        if self.runtime == Runtime::Kubernetes {
+            return &[];
+        }
+        match self.state.as_str() {
+            "running" => &[Action::Stop, Action::Restart, Action::Pause],
+            "restarting" => &[Action::Stop, Action::Restart],
+            _ if self.is_paused() => &[Action::Resume],
+            _ if self.can_start() => &[Action::Start],
+            _ => &[],
+        }
+    }
+
     pub fn is_failing(&self) -> bool {
         match self.runtime {
             Runtime::Kubernetes => !matches!(
@@ -153,6 +182,8 @@ pub enum Action {
     Start,
     Stop,
     Restart,
+    Pause,
+    Resume,
 }
 
 impl Action {
@@ -161,6 +192,8 @@ impl Action {
             Action::Start => "Start",
             Action::Stop => "Stop",
             Action::Restart => "Restart",
+            Action::Pause => "Pause",
+            Action::Resume => "Resume",
         }
     }
 
@@ -169,6 +202,8 @@ impl Action {
             Action::Start => "start",
             Action::Stop => "stop",
             Action::Restart => "restart",
+            Action::Pause => "pause",
+            Action::Resume => "unpause",
         }
     }
 }
@@ -196,11 +231,20 @@ pub async fn list(client: &SshClient, sudo: bool) -> Result<Listing> {
 }
 
 pub async fn act(client: &SshClient, item: &Item, action: Action, sudo: bool) -> Result<()> {
-    if item.runtime == Runtime::Kubernetes {
-        bail!("Kubernetes pods can't be {}ed from here", action.verb());
-    }
     item.valid()
-        .ok_or_else(|| anyhow!("unsafe container name"))?;
+        .ok_or_else(|| anyhow!("Invalid container ID or name"))?;
+    if !item.actions().contains(&action) {
+        bail!(
+            "{} is unavailable when {} is {}",
+            action.label(),
+            item.name,
+            if item.state.is_empty() {
+                "in an unknown state"
+            } else {
+                &item.state
+            },
+        );
+    }
     let command = format!(
         "{}{} {} {} 2>&1",
         sudo_prefix(sudo),
@@ -219,15 +263,25 @@ pub async fn act(client: &SshClient, item: &Item, action: Action, sudo: bool) ->
 }
 
 pub async fn logs(client: &SshClient, item: &Item, sudo: bool) -> Result<String> {
+    read_logs(client, item, sudo, false).await
+}
+
+async fn read_logs(
+    client: &SshClient,
+    item: &Item,
+    sudo: bool,
+    timestamps: bool,
+) -> Result<String> {
     item.valid()
         .ok_or_else(|| anyhow!("unsafe container name"))?;
+    let timestamps = if timestamps { " --timestamps" } else { "" };
     let command = match item.runtime {
         Runtime::Kubernetes => format!(
-            "kubectl logs --tail={LOG_LINES} -n {} {} 2>&1",
+            "kubectl logs --tail={LOG_LINES}{timestamps} -n {} {} 2>&1",
             item.scope, item.name
         ),
         rt => format!(
-            "{}{} logs --tail {LOG_LINES} {} 2>&1",
+            "{}{} logs --tail {LOG_LINES}{timestamps} {} 2>&1",
             sudo_prefix(sudo),
             rt.cli(),
             item.scope
@@ -417,6 +471,34 @@ pub struct LogView {
     pub text: Option<Result<String, String>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StateFilter {
+    #[default]
+    All,
+    Running,
+    Paused,
+    Stopped,
+}
+
+impl StateFilter {
+    pub fn matches(self, item: &Item) -> bool {
+        match self {
+            Self::All => true,
+            Self::Running => item.is_running(),
+            Self::Paused => item.is_paused(),
+            Self::Stopped => {
+                item.can_start()
+                    || match item.runtime {
+                        Runtime::Kubernetes => {
+                            matches!(item.state.as_str(), "Completed" | "Succeeded" | "Failed")
+                        }
+                        _ => item.state == "dead",
+                    }
+            }
+        }
+    }
+}
+
 /// Panel state for one terminal tab.
 #[derive(Default)]
 pub struct Browser {
@@ -430,15 +512,22 @@ pub struct Browser {
     pub last_poll: f64,
     /// Label of the action running right now (`Stop web`).
     pub busy: Option<String>,
+    /// Wait for a fresh list before offering another lifecycle command.
+    action_refresh_pending: bool,
     /// Outcome of the last action, shown until the next one.
     pub notice: Option<Result<String, String>>,
     pub logs: Option<LogView>,
     pub filter: String,
+    pub state_filter: StateFilter,
     /// Run Docker and Podman through `sudo -n`; chosen by the user for this pane.
     pub use_sudo: bool,
 }
 
 impl Browser {
+    pub fn can_act(&self) -> bool {
+        self.busy.is_none() && !self.in_flight && !self.action_refresh_pending
+    }
+
     pub fn reset(&mut self, session: u64) {
         *self = Self {
             session,
@@ -450,6 +539,7 @@ impl Browser {
         self.in_flight = false;
         match result {
             Ok(listing) => {
+                self.action_refresh_pending = false;
                 self.manager.reconcile(&listing);
                 self.listing = Some(listing);
                 self.error = None;
@@ -460,6 +550,7 @@ impl Browser {
 
     pub fn apply_action(&mut self, result: Result<String, String>) {
         self.busy = None;
+        self.action_refresh_pending = true;
         self.notice = Some(result);
         // Show the new state right away instead of waiting for the next poll.
         self.last_poll = f64::NEG_INFINITY;

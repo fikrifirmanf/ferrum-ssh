@@ -1,7 +1,7 @@
 //! Vault data model: hosts, groups, identities, keys, port forwarding rules,
 //! snippets, known hosts, history and settings.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -492,6 +492,7 @@ pub struct Settings {
     pub local_shell: String,
     pub session_logging: bool,
     pub log_dir: String,
+    pub log_filter_presets: HashMap<Uuid, Vec<LogFilterPreset>>,
     pub default_keepalive_secs: u32,
     pub term_type: String,
     pub sync_folder: String,
@@ -584,6 +585,7 @@ impl Default for Settings {
             local_shell: String::new(),
             session_logging: false,
             log_dir: String::new(),
+            log_filter_presets: HashMap::new(),
             default_keepalive_secs: 30,
             term_type: "xterm-256color".into(),
             sync_folder: String::new(),
@@ -610,6 +612,21 @@ impl Default for Settings {
             file_associations: vec![],
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct LogSearch {
+    pub query: String,
+    pub regex: bool,
+    pub case_sensitive: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LogFilterPreset {
+    pub name: String,
+    pub search: LogSearch,
+    pub sources: BTreeSet<String>,
 }
 
 /// Everything stored (encrypted) on disk.

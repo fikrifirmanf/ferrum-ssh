@@ -784,6 +784,128 @@ impl App {
                     tab.containers.manager.last_detail_poll = f64::MAX;
                 }
             }
+            "containerimages" | "containervolumes" | "containervolumefiles" | "containervolumeimport" | "containervolumeeditor" => {
+                use crate::containers::inventory::{Detail, Entry, Image, Kind, Reply, Request, Volume};
+                if let Some(Tab::Terminal(tab)) = self.tabs.last_mut() {
+                    let (kind, entry, metadata) = if step == "containerimages" {
+                        let id = "sha256:2e3eb11462c4e3759e6972678dd051d150ff54b1e60714b3c33b701260172a90";
+                        (
+                            Kind::Images,
+                            Entry::Image(Image { id: id.into(), repository: "redis".into(), tag: "7".into(), size: "192MB".into() }),
+                            serde_json::json!({"id": id, "tags": ["redis:7"], "os": "linux", "architecture": "arm64", "size_bytes": 189938399}),
+                        )
+                    } else {
+                        (
+                            Kind::Volumes,
+                            Entry::Volume(Volume { name: "app-data".into(), driver: "local".into(), scope: "local".into() }),
+                            serde_json::json!({"name": "app-data", "driver": "local", "scope": "local", "mountpoint": "/var/lib/docker/volumes/app-data/_data"}),
+                        )
+                    };
+                    let id = entry.id().to_owned();
+                    let inventory = &mut tab.containers.manager.inventory;
+                    tab.containers.manager.section =
+                        crate::containers::manager::Section::Inventory(kind);
+                    let page = inventory.page(kind);
+                    page.apply(Request::List(kind), Ok(Reply::Listing(vec![entry])));
+                    if step == "containervolumeimport" {
+                        page.clear_selection();
+                        page.input = "restored-data".into();
+                    } else {
+                        page.select(&id);
+                        page.apply(Request::Inspect(kind, id), Ok(Reply::Detail(Detail::Metadata(metadata))));
+                    }
+                    if step == "containervolumefiles" {
+                        use crate::containers::volume_files::{Entry, Kind};
+                        page.files.open = true;
+                        page.files.apply(page.files.revision, Ok(vec![
+                            Entry { name: b"nested".to_vec(), kind: Kind::Directory },
+                            Entry { name: b".config".to_vec(), kind: Kind::File(6) },
+                            Entry { name: b"alias".to_vec(), kind: Kind::Link },
+                            Entry { name: b"blob.bin".to_vec(), kind: Kind::File(3) },
+                        ]));
+                    }
+                    if step == "containervolumeeditor" {
+                        use crate::containers::volume_files::{EditResult, version};
+                        page.files.open = true;
+                        page.files.open_editor(b"service.toml".to_vec());
+                        let text = "[http]\nport = 8080\n\n[logging]\nlevel = \"info\"\n";
+                        page.files.apply_edit(page.files.revision, Ok(EditResult::Opened {
+                            version: version("20:123:49:time:time:1", text).expect("valid demo revision"),
+                            text: text.into(),
+                        }));
+                    }
+                }
+            }
+            "containerbuilds" => {
+                use crate::containers::inventory::{Detail, Entry, Kind, Reply, Request};
+                if let Some(Tab::Terminal(tab)) = self.tabs.last_mut() {
+                    let build_ref = "desktop-linux/desktop-linux/pmb2k96xaq5c29pr8kedmabvx";
+                    let build = serde_json::from_value(serde_json::json!({
+                        "ref": build_ref,
+                        "name": "web image",
+                        "status": "Error",
+                        "created_at": "2026-11-18T17:56:33Z",
+                        "completed_at": "2026-11-18T17:56:36Z",
+                        "completed_steps": 3,
+                        "total_steps": 4,
+                        "cached_steps": 1,
+                    }))
+                    .expect("valid build history fixture");
+                    let kind = Kind::Builds;
+                    let inventory = &mut tab.containers.manager.inventory;
+                    tab.containers.manager.section =
+                        crate::containers::manager::Section::Inventory(kind);
+                    let page = inventory.page(kind);
+                    page.apply(Request::List(kind), Ok(Reply::Listing(vec![Entry::Build(build)])));
+                    page.select(build_ref);
+                    page.apply(
+                        Request::Inspect(kind, build_ref.into()),
+                        Ok(Reply::Detail(Detail::BuildLog(
+                            "#1 [internal] load build definition from Dockerfile\n#1 DONE 0.0s\n\n#4 [1/1] COPY missing-file /missing-file\n#4 ERROR: missing-file not found\n".into(),
+                        ))),
+                    );
+                }
+            }
+            "containerunifiedlogs" => {
+                use crate::containers::{
+                    inventory::{Entry, Kind, Reply, Request},
+                    manager::Section,
+                    unified_logs::{Row, Snapshot, Source},
+                };
+                if let Some(Tab::Terminal(tab)) = self.tabs.last_mut() {
+                    let build_ref = "desktop-linux/desktop-linux/build123";
+                    let build = serde_json::from_value(serde_json::json!({
+                        "ref": build_ref,
+                        "name": "web image",
+                        "status": "Error",
+                        "created_at": "2026-11-18T18:13:27Z",
+                    }))
+                    .expect("valid log source fixture");
+                    let manager = &mut tab.containers.manager;
+                    manager.section = Section::Logs;
+                    manager.inventory.page(Kind::Builds).apply(
+                        Request::List(Kind::Builds),
+                        Ok(Reply::Listing(vec![Entry::Build(build)])),
+                    );
+                    let view = &mut manager.unified_logs;
+                    if let Some(item) = tab.containers.listing.as_ref().and_then(|list| list.items.first()) {
+                        view.change_source(Source::Container(item.clone()).key(), true);
+                    }
+                    view.change_source(format!("Build/{build_ref}"), true);
+                    view.apply(view.revision, Snapshot {
+                        rows: [
+                            ("2026-11-18T18:12:37.043449Z", "Docker / shop-api-1", "Listening on port 8080"),
+                            ("2026-11-18T18:12:37.043507Z", "Docker / shop-api-1", "Database connection ready"),
+                            ("2026-11-18T18:13:27.956795Z", "Build / web image (build123)", "COPY missing-file /missing-file: source not found"),
+                        ].map(|(time, source, message)| Row {
+                            time: time.parse().ok(),
+                            source: source.into(),
+                            message: message.into(),
+                        }).into(),
+                        errors: Vec::new(),
+                    });
+                }
+            }
             "containerstats" | "containerinspect" | "containerlist" => {
                 if let Some(Tab::Terminal(tab)) = self.tabs.last_mut() {
                     if step == "containerlist" {

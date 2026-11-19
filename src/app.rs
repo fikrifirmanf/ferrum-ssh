@@ -823,6 +823,72 @@ impl App {
                         tt.containers.apply_list(result);
                     }
                 }
+                AppEvent::ContainerInventory {
+                    tab,
+                    session,
+                    request,
+                    result,
+                } => {
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        tt.containers
+                            .manager
+                            .inventory
+                            .page(request.kind())
+                            .apply(request, result);
+                    }
+                }
+                AppEvent::VolumeFiles {
+                    tab,
+                    session,
+                    revision,
+                    result,
+                } => {
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        tt.containers
+                            .manager
+                            .inventory
+                            .page(crate::containers::inventory::Kind::Volumes)
+                            .files
+                            .apply(revision, result);
+                    }
+                }
+                AppEvent::VolumeEdit { tab, session, revision, result } => {
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        tt.containers.manager.inventory
+                            .page(crate::containers::inventory::Kind::Volumes)
+                            .files.apply_edit(revision, result);
+                    }
+                }
+                AppEvent::VolumeImport { tab, session, name, result } => {
+                    let success = result.is_ok();
+                    let notice = result.map(|()| format!("Imported {name}."));
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        let page = tt.containers
+                            .manager
+                            .inventory
+                            .page(crate::containers::inventory::Kind::Volumes);
+                        page.pending = false;
+                        page.listing = None;
+                        if success {
+                            page.input.clear();
+                        }
+                        page.notice = Some(notice.clone());
+                    }
+                    match notice {
+                        Ok(message) => self.toast(message, false),
+                        Err(message) => self.toast(message, true),
+                    }
+                }
+                AppEvent::UnifiedLogs {
+                    tab,
+                    session,
+                    revision,
+                    snapshot,
+                } => {
+                    if let Some(tt) = self.container_tab(tab, session) {
+                        tt.containers.manager.unified_logs.apply(revision, snapshot);
+                    }
+                }
                 AppEvent::ContainerResources {
                     tab,
                     session,
@@ -992,7 +1058,7 @@ impl App {
     }
 
     /// The terminal tab a container result belongs to, unless its pane has since changed.
-    fn container_tab(&mut self, tab: u64, session: u64) -> Option<&mut TermTab> {
+    pub(crate) fn container_tab(&mut self, tab: u64, session: u64) -> Option<&mut TermTab> {
         self.tabs.iter_mut().find_map(|t| match t {
             Tab::Terminal(tt) if tt.id == tab && tt.containers.session == session => Some(tt),
             _ => None,

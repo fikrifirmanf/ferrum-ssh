@@ -56,7 +56,21 @@ In a connected SSH terminal, choose **Tools → Containers → Open manager**. S
 
 Select a container for **Logs**, **Stats**, **Inspect**, or **Terminal**. Logs refresh every two seconds and show up to 300 lines, with pause and search controls. Resource samples refresh every five seconds while the manager is open, with up to 60 samples per container. Update ages show when samples become stale; unavailable measurements stay unknown. Kubernetes resource metrics and inspect are not part of this view.
 
-Inspect shows configuration, mounts, networks, ports and restart policy. Environment values, command arguments and arbitrary labels stay on the server. **Open container terminal** creates a separate interactive SSH channel; closing it keeps the host connection open. Start, stop and restart apply to the selected container. The manager uses the server's existing CLIs and installs no agent.
+Inspect shows configuration, mounts, networks, ports and restart policy. Environment values, command arguments and arbitrary labels stay on the server. **Open container terminal** creates a separate interactive SSH channel. Closing it keeps the host connection open.
+
+Use **Running**, **Paused**, or **Stopped** to filter the list by state. Docker and Podman actions depend on the selected container's state. You can pause a running container and resume it from the same view. The manager uses the server's existing CLIs and installs no agent.
+
+Choose **Images** or **Volumes** to browse Docker resources on the SSH host. Search by image tag or ID, or by volume name or driver. Select a row to inspect its metadata. Use **Pull image** with a registry reference or **Create volume** with a name.
+
+For a standard local Docker volume, choose **Browse files** to open folders and see file sizes. Choose **Export volume** to save a tar archive to your computer. The Docker host can pull Ferrum's pinned BusyBox helper on first use.
+
+In the file browser, choose **Edit text** to open a UTF-8 file up to 512 KiB. **Save file** checks the opened version before replacing the file and preserves its numeric owner, group and mode. Files with multiple hard links open read-only.
+
+To restore a tar or tar.gz archive, enter a fresh volume name in **Volumes** and choose **Import archive**. Ferrum validates the archive locally, then restores it into a new volume on the active SSH host.
+
+Choose **Builds** to read the SSH host's configured Buildx builder. Search records by name, status or reference. Select a build to see its step counts and search or copy its log.
+
+Choose **Unified logs** to combine recent lines from up to eight containers, pods, and Buildx records on the SSH host. Select the sources and choose **Refresh logs**, or enable **Auto-refresh** to update every five seconds while the view is open. Search by source or message, with regular expressions and case matching under **Search options**. Use **Saved filters** to keep a query and its sources for a saved SSH host. **Export logs** writes all loaded rows or just the matches to a JSON Lines file.
 
 Choose **Ports** to open a published Docker or Podman port locally. Select **HTTP**, **HTTPS**, or **TCP only**, then **Open locally**. Recognized database and messaging ports use TCP automatically. Ferrum rechecks the published binding and asks SSH to connect before announcing readiness. HTTP and HTTPS modes open the local URL in your browser; TCP-only mode gives you an address to use in another client.
 

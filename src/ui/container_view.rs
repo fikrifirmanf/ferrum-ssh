@@ -107,7 +107,7 @@ pub fn show(
         .icon(crate::icons::MAGNIFYING_GLASS)
         .show(ui, &mut browser.filter);
     let query = browser.filter.to_lowercase();
-    let busy = browser.busy.is_some();
+    let can_act = browser.can_act();
     if let Some(label) = &browser.busy {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -138,7 +138,7 @@ pub fn show(
                         .color(pal.text_dim),
                 );
                 for item in items {
-                    if let Some(c) = item_card(ui, pal, item, busy) {
+                    if let Some(c) = item_card(ui, pal, item, can_act) {
                         command = Some(c);
                     }
                 }
@@ -147,7 +147,7 @@ pub fn show(
     command
 }
 
-fn item_card(ui: &mut egui::Ui, pal: Palette, item: &Item, busy: bool) -> Option<Command> {
+fn item_card(ui: &mut egui::Ui, pal: Palette, item: &Item, can_act: bool) -> Option<Command> {
     let mut command = None;
     card_frame(pal).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -181,19 +181,12 @@ fn item_card(ui: &mut egui::Ui, pal: Palette, item: &Item, busy: bool) -> Option
             ui.label(RichText::new(status).small().color(pal.text_dim));
         }
         ui.horizontal_wrapped(|ui| {
-            if !kube {
-                let actions: &[Action] = if item.is_running() {
-                    &[Action::Stop, Action::Restart]
-                } else {
-                    &[Action::Start]
-                };
-                for &action in actions {
-                    if ui
-                        .add_enabled(!busy, egui::Button::new(action.label()).small())
-                        .clicked()
-                    {
-                        command = Some(Command::Act(item.clone(), action));
-                    }
+            for &action in item.actions() {
+                if ui
+                    .add_enabled(can_act, egui::Button::new(action.label()).small())
+                    .clicked()
+                {
+                    command = Some(Command::Act(item.clone(), action));
                 }
             }
             if ui.add(egui::Button::new("Logs").small()).clicked() {

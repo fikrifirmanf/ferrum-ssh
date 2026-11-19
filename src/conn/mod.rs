@@ -121,6 +121,36 @@ pub enum AppEvent {
         session: u64,
         result: Result<crate::containers::Listing, String>,
     },
+    ContainerInventory {
+        tab: u64,
+        session: u64,
+        request: crate::containers::inventory::Request,
+        result: Result<crate::containers::inventory::Reply, String>,
+    },
+    VolumeFiles {
+        tab: u64,
+        session: u64,
+        revision: u64,
+        result: Result<Vec<crate::containers::volume_files::Entry>, String>,
+    },
+    VolumeEdit {
+        tab: u64,
+        session: u64,
+        revision: u64,
+        result: Result<crate::containers::volume_files::EditResult, String>,
+    },
+    VolumeImport {
+        tab: u64,
+        session: u64,
+        name: String,
+        result: Result<(), String>,
+    },
+    UnifiedLogs {
+        tab: u64,
+        session: u64,
+        revision: u64,
+        snapshot: crate::containers::unified_logs::Snapshot,
+    },
     ContainerResources {
         tab: u64,
         session: u64,

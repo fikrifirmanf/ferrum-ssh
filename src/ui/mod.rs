@@ -1,5 +1,8 @@
 //! UI building blocks plus the chrome (tab bar, sidebar, toasts, palette).
 
+mod container_inventory;
+mod container_logs;
+mod container_volume_files;
 pub mod container_manager;
 pub mod container_view;
 pub mod dialogs;

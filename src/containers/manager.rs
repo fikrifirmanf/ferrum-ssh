@@ -36,8 +36,19 @@ pub struct Sample {
     pub stats: Stats,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum Section {
+    #[default]
+    Containers,
+    Inventory(super::inventory::Kind),
+    Logs,
+}
+
 pub struct Manager {
     pub open: bool,
+    pub section: Section,
+    pub inventory: super::inventory::Inventory,
+    pub unified_logs: super::unified_logs::View,
     pub selected: Option<String>,
     pub focus_details: bool,
     pub tab: DetailTab,
@@ -63,6 +74,9 @@ impl Default for Manager {
     fn default() -> Self {
         Self {
             open: false,
+            section: Section::default(),
+            inventory: Default::default(),
+            unified_logs: Default::default(),
             selected: None,
             focus_details: false,
             tab: DetailTab::Logs,
